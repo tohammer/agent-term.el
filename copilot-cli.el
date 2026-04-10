@@ -138,6 +138,14 @@ Either `vterm' or `eat'."
   :type 'boolean
   :group 'copilot-cli)
 
+(defcustom copilot-cli-emacs-keybindings '()
+  "Keys to handle with their normal Emacs bindings instead of forwarding to the terminal.
+Each entry is a key string accepted by `kbd'.  The key's global binding
+at the time the session starts will be used.  Add any key here that you
+want Emacs to handle rather than the terminal process."
+  :type '(repeat string)
+  :group 'copilot-cli)
+
 ;;; State
 
 (defvar copilot-cli--cli-available nil
@@ -299,9 +307,14 @@ rendering until a quiet moment.  PROCESS and INPUT are passed through."
                                  (window-body-width window))))))
 
 (defun copilot-cli--setup-terminal-keybindings ()
-  "Bind Copilot-specific keys in the current terminal buffer."
+  "Bind Copilot-specific keys in the current terminal buffer.
+Keys in `copilot-cli-emacs-keybindings' are intercepted and handled
+by their normal Emacs global binding instead of forwarding to the terminal."
   (local-set-key (kbd "S-<return>") #'copilot-cli-insert-newline)
-  (local-set-key (kbd "C-<escape>") #'copilot-cli-send-escape))
+  (local-set-key (kbd "C-<escape>") #'copilot-cli-send-escape)
+  (dolist (key copilot-cli-emacs-keybindings)
+    (when-let* ((binding (global-key-binding (kbd key))))
+      (local-set-key (kbd key) binding))))
 
 ;;; Reflow Glitch Prevention
 ;;
