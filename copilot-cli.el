@@ -154,8 +154,75 @@ Either `vterm' or `eat'."
 
 ;;; Terminal Backend: vterm helpers
 
+(defcustom copilot-cli-vterm-anti-flicker t
+  "Batch rapid vterm output sequences to reduce terminal flicker.
+When enabled, detects high-density escape sequences (TUI redraws) and
+batches them into a single redisplay update."
+  :type 'boolean
+  :group 'copilot-cli)
+
+(defcustom copilot-cli-vterm-render-delay 0.005
+  "Delay in seconds for batched vterm rendering when anti-flicker is active."
+  :type 'number
+  :group 'copilot-cli)
+
+(defvar-local copilot-cli--vterm-render-queue nil
+  "Pending output strings for batched vterm rendering (reverse order).")
+
+(defvar-local copilot-cli--vterm-render-timer nil
+  "Timer for flushing the vterm render queue.")
+
 (defvar-local copilot-cli--saved-cursor-type nil
   "Saved cursor-type when entering vterm copy mode.")
+
+(defun copilot-cli--count-escape-sequence (sequence input)
+  "Count occurrences of SEQUENCE in INPUT efficiently."
+  (let ((count 0) (start 0))
+    (while (setq start (string-search sequence input start))
+      (cl-incf count)
+      (cl-incf start (length sequence)))
+    count))
+
+(defun copilot-cli--vterm-smart-renderer (orig-fun process input)
+  "Batch rapid vterm output to reduce TUI flicker.
+Wraps ORIG-FUN; detects high-density escape sequences and defers
+rendering until a quiet moment.  PROCESS and INPUT are passed through."
+  (if (not copilot-cli-vterm-anti-flicker)
+      (funcall orig-fun process input)
+    (with-current-buffer (process-buffer process)
+      ;; Fast path: no escapes and no active queue → pass through immediately
+      (if (and (not copilot-cli--vterm-render-queue)
+               (not (string-search "\033" input)))
+          (funcall orig-fun process input)
+        (let* ((complex-redraw
+                (string-match-p "\033\\[[0-9]*A.*\033\\[K.*\033\\[[0-9]*A.*\033\\[K" input))
+               (clear-count (copilot-cli--count-escape-sequence "\033[K" input))
+               (escape-count (cl-count ?\033 input))
+               (escape-density (if (> (length input) 0)
+                                   (/ (float escape-count) (length input)) 0)))
+          (if (or complex-redraw
+                  (and (> escape-density 0.3) (>= clear-count 2))
+                  copilot-cli--vterm-render-queue)
+              (progn
+                (push input copilot-cli--vterm-render-queue)
+                (when copilot-cli--vterm-render-timer
+                  (cancel-timer copilot-cli--vterm-render-timer))
+                (setq copilot-cli--vterm-render-timer
+                      (run-at-time copilot-cli-vterm-render-delay nil
+                                   (lambda (buf)
+                                     (when (buffer-live-p buf)
+                                       (with-current-buffer buf
+                                         (when copilot-cli--vterm-render-queue
+                                           (let* ((inhibit-redisplay t)
+                                                  (data (apply #'concat
+                                                               (nreverse copilot-cli--vterm-render-queue))))
+                                             (setq copilot-cli--vterm-render-queue nil
+                                                   copilot-cli--vterm-render-timer nil)
+                                             (funcall orig-fun
+                                                      (get-buffer-process buf)
+                                                      data))))))
+                                   (current-buffer))))
+            (funcall orig-fun process input)))))))
 
 (defun copilot-cli--vterm-copy-mode-hook ()
   "Preserve cursor visibility when entering/leaving vterm copy mode."
@@ -178,7 +245,9 @@ Either `vterm' or `eat'."
   (face-remap-add-relative 'nobreak-space :inherit 'default)
   (add-hook 'vterm-copy-mode-hook #'copilot-cli--vterm-copy-mode-hook nil t)
   (when-let* ((proc (get-buffer-process (current-buffer))))
-    (set-process-query-on-exit-flag proc nil)))
+    (set-process-query-on-exit-flag proc nil))
+  (when copilot-cli-vterm-anti-flicker
+    (advice-add 'vterm--filter :around #'copilot-cli--vterm-smart-renderer)))
 
 ;;; Terminal Backend Abstraction
 
