@@ -162,7 +162,7 @@ Decrements the session counter and stops the server when no sessions remain."
 SESSION-ID is embedded in the URL path so each session has its own context."
   (when-let* ((port (copilot-cli-mcp-server-get-port)))
     (let* ((path (if session-id (format "/mcp/%s" session-id) "/mcp"))
-           (url (format "http://localhost:%d%s" port path))
+           (url (format "http://127.0.0.1:%d%s" port path))
            (config `((type . "http") (url . ,url))))
       `((mcpServers . ((emacs-tools . ,config)))))))
 

@@ -458,7 +458,7 @@ route tool calls to the correct Emacs session context."
           ;; Escape for embedding inside a double-quoted shell argument (vterm uses sh -c)
           (setq json-str (replace-regexp-in-string "\\\\" "\\\\\\\\" json-str))
           (setq json-str (replace-regexp-in-string "\"" "\\\\\"" json-str))
-          (setq cmd (concat cmd " --mcp-config \"" json-str "\"")))))
+          (setq cmd (concat cmd " --additional-mcp-config \"" json-str "\"")))))
     cmd))
 
 ;;; Terminal Session Creation
@@ -500,6 +500,7 @@ Returns a cons cell (buffer . process) on success."
                         #'copilot-cli--terminal-position-keeper))
           (setq-local process-environment
                       (append env-vars process-environment))
+          (setq-local eat-kill-buffer-on-exit t)
           (eat-exec buffer buffer-name program nil args)
           (let ((process (get-buffer-process buffer)))
             (unless process (error "Failed to create eat process"))
@@ -564,8 +565,7 @@ If a session is already running, toggle its window visibility instead."
                             (lambda (&rest _)
                               (when (buffer-live-p buffer) (kill-buffer buffer)))
                             nil t))
-                 ((eq copilot-cli-terminal-backend 'eat)
-                  (setq-local eat-kill-buffer-on-exit t))))
+                 ((eq copilot-cli-terminal-backend 'eat) nil)))
               (sleep-for copilot-cli-terminal-initialization-delay)
               (copilot-cli--display-buffer-in-side-window buffer)
               (copilot-cli-log "Copilot started in %s%s"
