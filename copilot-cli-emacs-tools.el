@@ -436,8 +436,16 @@ Unlike reading the file from disk, this captures unsaved changes."
       "No file-visiting buffers open")))
 
 (defun copilot-cli-mcp-compilation-errors ()
-  "Return errors and warnings from the most recent `*compilation*' buffer."
-  (let ((comp-buffer (get-buffer "*compilation*")))
+  "Return errors and warnings from the most recent compilation buffer.
+Finds any buffer derived from `compilation-mode', preferring the most
+recently used one, so names like \"*compilation*<project>\" are found."
+  (let ((comp-buffer
+         (or (get-buffer "*compilation*")
+             ;; Find the most recently used compilation-mode buffer
+             (cl-find-if (lambda (buf)
+                           (with-current-buffer buf
+                             (derived-mode-p 'compilation-mode)))
+                         (buffer-list)))))
     (if (not comp-buffer)
         "No compilation buffer found.  Run M-x compile first."
       (with-current-buffer comp-buffer
