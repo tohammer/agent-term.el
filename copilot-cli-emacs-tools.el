@@ -437,15 +437,19 @@ Unlike reading the file from disk, this captures unsaved changes."
 
 (defun copilot-cli-mcp-compilation-errors ()
   "Return errors and warnings from the most recent compilation buffer.
-Finds any buffer derived from `compilation-mode', preferring the most
-recently used one, so names like \"*compilation*<project>\" are found."
-  (let ((comp-buffer
-         (or (get-buffer "*compilation*")
-             ;; Find the most recently used compilation-mode buffer
-             (cl-find-if (lambda (buf)
-                           (with-current-buffer buf
-                             (derived-mode-p 'compilation-mode)))
-                         (buffer-list)))))
+Scopes to the current MCP session's project directory when available,
+so multi-project setups return the correct compilation buffer."
+  (let* ((context (copilot-cli-mcp-server-get-session-context))
+         (project-dir (and context (expand-file-name
+                                    (plist-get context :project-dir))))
+         (comp-buffer
+          (cl-find-if (lambda (buf)
+                        (with-current-buffer buf
+                          (and (derived-mode-p 'compilation-mode)
+                               (or (null project-dir)
+                                   (string-prefix-p project-dir
+                                                    (expand-file-name default-directory))))))
+                      (buffer-list))))
     (if (not comp-buffer)
         "No compilation buffer found.  Run M-x compile first."
       (with-current-buffer comp-buffer
