@@ -107,6 +107,7 @@
                 (directory-file-name (copilot-cli--get-working-directory))))
     (copilot-cli-resume)))
 
+(defun copilot-cli--session-status ()
   "Return a string describing the current session status."
   (if (copilot-cli--has-active-session-p)
       (propertize (format "Active session in [%s]"
