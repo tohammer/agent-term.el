@@ -461,7 +461,7 @@ by their normal Emacs global binding instead of forwarding to the terminal."
                             `((window-height . ,copilot-cli-window-height)))
                         (window-parameters . ((no-delete-other-windows . t)))))))
                (display-buffer buffer))
-           (switch-to-buffer buffer))))
+           (progn (switch-to-buffer buffer) (selected-window)))))
     (setq copilot-cli--last-accessed-buffer buffer)
     (when (and window copilot-cli-focus-on-open) (select-window window))
     (when (and window copilot-cli-use-side-window
