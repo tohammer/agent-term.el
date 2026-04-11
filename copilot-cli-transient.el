@@ -29,6 +29,8 @@
 (require 'copilot-cli-debug)
 
 (declare-function copilot-cli "copilot-cli" ())
+(declare-function copilot-cli-continue "copilot-cli" ())
+(declare-function copilot-cli-resume "copilot-cli" (&optional session-id))
 (declare-function copilot-cli-stop "copilot-cli" ())
 (declare-function copilot-cli-list-sessions "copilot-cli" ())
 (declare-function copilot-cli-switch-to-buffer "copilot-cli" ())
@@ -73,7 +75,38 @@
                 (directory-file-name (copilot-cli--get-working-directory))))
     (copilot-cli)))
 
-(defun copilot-cli--session-status ()
+(defun copilot-cli--continue-description ()
+  "Dynamic description for continue command."
+  (if (copilot-cli--has-active-session-p)
+      (propertize "Continue most recent session (session already running)"
+                  'face 'transient-inactive-value)
+    "Continue most recent session"))
+
+(defun copilot-cli--continue-if-no-session ()
+  "Continue most recent Copilot session only if no session is active."
+  (interactive)
+  (if (copilot-cli--has-active-session-p)
+      (message "[%s] Copilot session already running"
+               (file-name-nondirectory
+                (directory-file-name (copilot-cli--get-working-directory))))
+    (copilot-cli-continue)))
+
+(defun copilot-cli--resume-description ()
+  "Dynamic description for resume command."
+  (if (copilot-cli--has-active-session-p)
+      (propertize "Resume previous session (session already running)"
+                  'face 'transient-inactive-value)
+    "Resume previous session"))
+
+(defun copilot-cli--resume-if-no-session ()
+  "Resume a previous Copilot session only if no session is active."
+  (interactive)
+  (if (copilot-cli--has-active-session-p)
+      (message "[%s] Copilot session already running"
+               (file-name-nondirectory
+                (directory-file-name (copilot-cli--get-working-directory))))
+    (copilot-cli-resume)))
+
   "Return a string describing the current session status."
   (if (copilot-cli--has-active-session-p)
       (propertize (format "Active session in [%s]"
@@ -176,6 +209,8 @@
   ["Copilot CLI"
    ["Session"
     ("s" copilot-cli--start-if-no-session :description copilot-cli--start-description)
+    ("c" copilot-cli--continue-if-no-session :description copilot-cli--continue-description)
+    ("r" copilot-cli--resume-if-no-session :description copilot-cli--resume-description)
     ("q" "Stop current session" copilot-cli-stop)
     ("l" "List all sessions" copilot-cli-list-sessions)]
    ["Navigation"

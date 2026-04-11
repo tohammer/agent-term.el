@@ -523,11 +523,19 @@ by their normal Emacs global binding instead of forwarding to the terminal."
   (let ((parts (split-string-shell-command command-string)))
     (cons (car parts) (cdr parts))))
 
-(defun copilot-cli--build-command (&optional session-id)
+(defun copilot-cli--build-command (&optional session-id continue resume)
   "Build the shell command string for launching Copilot CLI.
 SESSION-ID is embedded in the MCP config URL so the HTTP server can
-route tool calls to the correct Emacs session context."
+route tool calls to the correct Emacs session context.
+CONTINUE, if non-nil, adds --continue to resume the most recent session.
+RESUME, if non-nil, adds --resume (optionally with a session ID string)."
   (let ((cmd copilot-cli-cli-path))
+    ;; Session resume flags
+    (when continue
+      (setq cmd (concat cmd " --continue")))
+    (when resume
+      (setq cmd (concat cmd " --resume"
+                        (if (stringp resume) (concat " " resume) ""))))
     ;; Extra user-supplied flags
     (when (and copilot-cli-cli-extra-flags
                (not (string-empty-p copilot-cli-cli-extra-flags)))
@@ -545,11 +553,13 @@ route tool calls to the correct Emacs session context."
 
 ;;; Terminal Session Creation
 
-(defun copilot-cli--create-terminal-session (buffer-name working-dir session-id)
+(defun copilot-cli--create-terminal-session (buffer-name working-dir session-id
+                                              &optional continue resume)
   "Create a terminal buffer running Copilot in WORKING-DIR.
+CONTINUE and RESUME are passed to `copilot-cli--build-command'.
 Returns a cons cell (buffer . process) on success."
   (copilot-cli--terminal-ensure-backend)
-  (let* ((cmd (copilot-cli--build-command session-id))
+  (let* ((cmd (copilot-cli--build-command session-id continue resume))
          (default-directory working-dir)
          (env-vars '("TERM_PROGRAM=emacs" "FORCE_CODE_TERMINAL=true")))
     (copilot-cli-debug "Starting Copilot: %s" cmd)
@@ -603,9 +613,11 @@ Returns a cons cell (buffer . process) on success."
       (copilot-cli--display-buffer-in-side-window existing-buffer)
       (copilot-cli-debug "Copilot window shown"))))
 
-(defun copilot-cli--start-session ()
+(defun copilot-cli--start-session (&optional continue resume)
   "Start a Copilot CLI session for the current project.
-If a session is already running, toggle its window visibility instead."
+If a session is already running, toggle its window visibility instead.
+CONTINUE, if non-nil, passes --continue to resume the most recent session.
+RESUME, if non-nil, passes --resume (with optional session-id string)."
   (unless (copilot-cli--ensure-cli)
     (user-error "Copilot CLI not available.  Install it and ensure it is in PATH"))
   (copilot-cli--cleanup-dead-processes)
@@ -621,7 +633,7 @@ If a session is already running, toggle its window visibility instead."
                                 (format-time-string "%Y%m%d-%H%M%S"))))
         (condition-case err
             (let* ((result (copilot-cli--create-terminal-session
-                            buffer-name working-dir session-id))
+                            buffer-name working-dir session-id continue resume))
                    (buffer (car result))
                    (process (cdr result)))
               ;; Register the session
@@ -667,6 +679,25 @@ If a session is already running, toggle its window visibility instead."
 If a session is already running, toggle the window instead."
   (interactive)
   (copilot-cli--start-session))
+
+;;;###autoload
+(defun copilot-cli-continue ()
+  "Continue the most recent Copilot session for the current project.
+Starts Copilot with --continue to resume the last conversation."
+  (interactive)
+  (copilot-cli--start-session t nil))
+
+;;;###autoload
+(defun copilot-cli-resume (&optional session-id)
+  "Resume a previous Copilot session, optionally specifying SESSION-ID.
+With a prefix argument, prompts for a session ID.
+Without a session ID, Copilot presents a session picker."
+  (interactive
+   (list (when current-prefix-arg
+           (read-string "Session ID (leave empty for picker): "))))
+  (copilot-cli--start-session nil (if (and session-id (not (string-empty-p session-id)))
+                                      session-id
+                                    t)))
 
 ;;;###autoload
 (defun copilot-cli-stop ()
