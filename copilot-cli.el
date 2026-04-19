@@ -653,6 +653,9 @@ RESUME, if non-nil, passes --resume (with optional session-id string)."
                           (lambda () (copilot-cli--cleanup-on-exit working-dir))
                           nil t)
                 (copilot-cli--setup-terminal-keybindings)
+                ;; Doom hooks hide-mode-line-mode onto vterm-mode; undo that.
+                (when (bound-and-true-p hide-mode-line-mode)
+                  (hide-mode-line-mode -1))
                 (cond
                  ((eq copilot-cli-terminal-backend 'vterm)
                   (add-hook 'vterm-exit-functions
