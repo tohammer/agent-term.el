@@ -1,4 +1,4 @@
-;;; copilot-cli-debug.el --- Debug logging for Copilot CLI  -*- lexical-binding: t; -*-
+;;; copilot-ide-debug.el --- Debug logging for Copilot CLI  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025
 
@@ -21,7 +21,7 @@
 
 ;;; Commentary:
 
-;; Debug logging functionality for copilot-cli.el.
+;; Debug logging functionality for copilot-ide.el.
 
 ;;; Code:
 
@@ -29,26 +29,26 @@
 
 ;;; Customization
 
-(defcustom copilot-cli-debug nil
+(defcustom copilot-ide-debug nil
   "When non-nil, enable debug logging for Copilot CLI."
   :type 'boolean
-  :group 'copilot-cli)
+  :group 'copilot-ide)
 
-(defcustom copilot-cli-log-with-context t
+(defcustom copilot-ide-log-with-context t
   "When non-nil, include project context in log messages."
   :type 'boolean
-  :group 'copilot-cli)
+  :group 'copilot-ide)
 
-(defcustom copilot-cli-debug-buffer "*copilot-cli-debug*"
+(defcustom copilot-ide-debug-buffer "*copilot-ide-debug*"
   "Buffer name for debug output."
   :type 'string
-  :group 'copilot-cli)
+  :group 'copilot-ide)
 
 ;;; Debug Functions
 
-(defun copilot-cli--get-session-context ()
+(defun copilot-ide--get-session-context ()
   "Get current session context for logging."
-  (if copilot-cli-log-with-context
+  (if copilot-ide-log-with-context
       (format "[%s]" (or (ignore-errors
                            (file-name-nondirectory
                             (directory-file-name
@@ -56,35 +56,35 @@
                          "no-project"))
     ""))
 
-(defmacro copilot-cli-debug (format-string &rest args)
+(defmacro copilot-ide-debug (format-string &rest args)
   "Log debug message with FORMAT-STRING and ARGS if debug is enabled."
-  `(when copilot-cli-debug
+  `(when copilot-ide-debug
      (let ((message (format ,format-string ,@args))
            (timestamp (format-time-string "%Y-%m-%d %H:%M:%S"))
-           (context (copilot-cli--get-session-context)))
-       (with-current-buffer (get-buffer-create copilot-cli-debug-buffer)
+           (context (copilot-ide--get-session-context)))
+       (with-current-buffer (get-buffer-create copilot-ide-debug-buffer)
          (goto-char (point-max))
          (insert (format "%s %s%s\n" timestamp context message))))))
 
-(defun copilot-cli-log (format-string &rest args)
+(defun copilot-ide-log (format-string &rest args)
   "Log message with FORMAT-STRING and ARGS."
   (let ((message (apply #'format format-string args)))
-    (message "%s %s" (copilot-cli--get-session-context) message)))
+    (message "%s %s" (copilot-ide--get-session-context) message)))
 
 ;;;###autoload
-(defun copilot-cli-show-debug ()
+(defun copilot-ide-show-debug ()
   "Show the debug buffer."
   (interactive)
-  (display-buffer (get-buffer-create copilot-cli-debug-buffer)))
+  (display-buffer (get-buffer-create copilot-ide-debug-buffer)))
 
 ;;;###autoload
-(defun copilot-cli-clear-debug ()
+(defun copilot-ide-clear-debug ()
   "Clear the debug buffer."
   (interactive)
-  (with-current-buffer (get-buffer-create copilot-cli-debug-buffer)
+  (with-current-buffer (get-buffer-create copilot-ide-debug-buffer)
     (erase-buffer)
     (message "Debug buffer cleared")))
 
-(provide 'copilot-cli-debug)
+(provide 'copilot-ide-debug)
 
-;;; copilot-cli-debug.el ends here
+;;; copilot-ide-debug.el ends here
