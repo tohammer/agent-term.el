@@ -121,6 +121,13 @@ When nil, use a regular buffer display."
   :type 'boolean
   :group 'copilot-cli)
 
+(defcustom copilot-cli-show-modeline t
+  "When non-nil, ensure the modeline is visible in the Copilot buffer.
+Some terminal modes (e.g. vterm via Doom Emacs) hide the modeline by default;
+this option overrides that behaviour."
+  :type 'boolean
+  :group 'copilot-cli)
+
 (defcustom copilot-cli-terminal-backend 'vterm
   "Terminal backend to use for running Copilot CLI.
 Either `vterm' or `eat'."
@@ -653,8 +660,8 @@ RESUME, if non-nil, passes --resume (with optional session-id string)."
                           (lambda () (copilot-cli--cleanup-on-exit working-dir))
                           nil t)
                 (copilot-cli--setup-terminal-keybindings)
-                ;; Doom hooks hide-mode-line-mode onto vterm-mode; undo that.
-                (when (bound-and-true-p hide-mode-line-mode)
+                (when (and copilot-cli-show-modeline
+                           (bound-and-true-p hide-mode-line-mode))
                   (hide-mode-line-mode -1))
                 (cond
                  ((eq copilot-cli-terminal-backend 'vterm)
