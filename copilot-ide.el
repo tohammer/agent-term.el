@@ -332,7 +332,26 @@ by their normal Emacs global binding instead of forwarding to the terminal."
   (local-set-key (kbd "C-<escape>") #'copilot-ide-send-escape)
   (dolist (key copilot-ide-emacs-keybindings)
     (when-let* ((binding (global-key-binding (kbd key))))
-      (local-set-key (kbd key) binding))))
+      (local-set-key (kbd key) binding)))
+  ;; For eat, minor mode keymaps (eat-semi-char-mode-map) take precedence over
+  ;; the buffer-local keymap, so local-set-key alone is insufficient.
+  ;; Use minor-mode-overriding-map-alist (buffer-local) to override eat's
+  ;; semi-char keymap for the intercepted keys.  The parent is set to
+  ;; eat-semi-char-mode-map so that all other keys still fall through to eat's
+  ;; normal handling — minor-mode-overriding-map-alist fully replaces the
+  ;; minor mode's map, so without a parent all unbound keys would bypass
+  ;; eat-self-input and hit self-insert-command on read-only terminal text.
+  (when (eq copilot-ide-terminal-backend 'eat)
+    (let ((override-map (make-sparse-keymap)))
+      (set-keymap-parent override-map eat-semi-char-mode-map)
+      (define-key override-map (kbd "S-<return>") #'copilot-ide-insert-newline)
+      (define-key override-map (kbd "C-<escape>") #'copilot-ide-send-escape)
+      (dolist (key copilot-ide-emacs-keybindings)
+        (when-let* ((binding (global-key-binding (kbd key))))
+          (define-key override-map (kbd key) binding)))
+      (setq-local minor-mode-overriding-map-alist
+                  (cons (cons 'eat--semi-char-mode override-map)
+                        minor-mode-overriding-map-alist)))))
 
 ;;; Reflow Glitch Prevention
 ;;
