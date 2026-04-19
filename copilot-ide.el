@@ -247,6 +247,17 @@ rendering until a quiet moment.  PROCESS and INPUT are passed through."
         (when (null cursor-type) (setq cursor-type t)))
     (setq cursor-type copilot-ide--saved-cursor-type)))
 
+(defun copilot-ide--eat-emacs-mode-cursor-fix (&rest _)
+  "Ensure cursor is visible when switching to eat emacs mode."
+  (when (and (copilot-ide--session-buffer-p (current-buffer))
+             (null cursor-type))
+    (setq-local cursor-type t)))
+
+(defun copilot-ide--eat-terminal-mode-cursor-fix (&rest _)
+  "Restore invisible cursor when leaving eat emacs mode in a Copilot buffer."
+  (when (copilot-ide--session-buffer-p (current-buffer))
+    (setq-local cursor-type nil)))
+
 (defun copilot-ide--configure-vterm-buffer ()
   "Configure vterm buffer settings for a Copilot session."
   (setq-local vterm-scroll-to-bottom-on-output nil)
@@ -600,6 +611,11 @@ Returns a cons cell (buffer . process) on success."
           (setq-local process-environment
                       (append env-vars process-environment))
           (setq-local eat-kill-buffer-on-exit t)
+          (advice-add 'eat-emacs-mode :after
+                      #'copilot-ide--eat-emacs-mode-cursor-fix)
+          (dolist (fn '(eat-semi-char-mode eat-char-mode))
+            (advice-add fn :after
+                        #'copilot-ide--eat-terminal-mode-cursor-fix))
           (eat-exec buffer buffer-name program nil args)
           (let ((process (get-buffer-process buffer)))
             (unless process (error "Failed to create eat process"))
