@@ -70,6 +70,10 @@
 (declare-function eat-exec "eat" (buffer name command startfile &rest switches))
 (declare-function eat-term-send-string "eat" (terminal string))
 (declare-function eat-term-display-cursor "eat" (terminal))
+(declare-function eat-term-display-beginning "eat" (terminal))
+(declare-function eat-term-size "eat" (terminal))
+(declare-function eat-term-resize "eat" (terminal width height))
+(declare-function eat-term-redisplay "eat" (terminal))
 (declare-function eat--adjust-process-window-size "eat" (process windows))
 
 ;;; Customization
@@ -320,9 +324,19 @@ rendering until a quiet moment.  PROCESS and INPUT are passed through."
   (when (and buffer window (buffer-live-p buffer) (window-live-p window))
     (with-current-buffer buffer
       (when-let* ((proc (get-buffer-process buffer)))
-        (set-process-window-size proc
-                                 (window-body-height window)
-                                 (window-body-width window))))))
+        (cond
+         ((and (eq copilot-ide-terminal-backend 'eat)
+               (bound-and-true-p eat-terminal))
+          (with-selected-window window
+            (let ((width (max (window-max-chars-per-line) 1))
+                  (height (max (floor (window-screen-lines)) 1))
+                  (inhibit-read-only t))
+              (eat-term-resize eat-terminal width height)
+              (eat-term-redisplay eat-terminal))))
+         (t
+          (set-process-window-size proc
+                                   (window-body-height window)
+                                   (window-body-width window))))))))
 
 (defun copilot-ide--setup-terminal-keybindings ()
   "Bind Copilot-specific keys in the current terminal buffer.
@@ -378,42 +392,50 @@ by their normal Emacs global binding instead of forwarding to the terminal."
     (string-prefix-p "*copilot-ide[" name)))
 
 (defun copilot-ide--terminal-reflow-filter (original-fn &rest args)
-  "Wrap ORIGINAL-FN to suppress height-only terminal reflows."
-  (let* ((base-result (apply original-fn args))
-         (dimensions-stable t))
-    (dolist (win (window-list))
-      (when-let* ((buf (window-buffer win))
-                  ((copilot-ide--session-buffer-p buf)))
-        (let* ((new-width (window-width win))
-               (cached-width (window-parameter win 'copilot-ide-cached-width)))
-          (unless (eql new-width cached-width)
-            (setq dimensions-stable nil)
-            (set-window-parameter win 'copilot-ide-cached-width new-width)))))
-    (cond
-     ((not (copilot-ide--session-buffer-p (current-buffer))) base-result)
-     ((copilot-ide--terminal-scroll-mode-active-p) nil)
-     ((not dimensions-stable) base-result)
-     (t nil))))
+  "Wrap ORIGINAL-FN to suppress height-only terminal reflows.
+For eat, skip entirely when only height changed to keep the eat
+terminal model and process dimensions in sync."
+  (cond
+   ((not (copilot-ide--session-buffer-p (current-buffer)))
+    (apply original-fn args))
+   ((copilot-ide--terminal-scroll-mode-active-p)
+    nil)
+   (t
+    (let ((dimensions-stable t))
+      (dolist (win (window-list))
+        (when-let* ((buf (window-buffer win))
+                    ((copilot-ide--session-buffer-p buf)))
+          (let* ((new-width (window-width win))
+                 (cached-width (window-parameter win 'copilot-ide-cached-width)))
+            (unless (eql new-width cached-width)
+              (setq dimensions-stable nil)
+              (set-window-parameter win 'copilot-ide-cached-width new-width)))))
+      (if dimensions-stable
+          ;; Height-only change: skip the original function entirely so that
+          ;; eat-term-resize is NOT called either, keeping eat's model and
+          ;; the process in agreement on the terminal dimensions.
+          nil
+        (apply original-fn args))))))
 
 ;;; eat position keeper
 
 (defun copilot-ide--terminal-position-keeper (window-list)
-  "Maintain stable eat terminal position across window switches."
+  "Maintain stable eat terminal position across window switches.
+Uses eat's native recenter calculation to ensure the terminal display
+area is properly aligned within each window."
   (dolist (win window-list)
     (if (eq win 'buffer)
         (goto-char (eat-term-display-cursor eat-terminal))
-      (unless buffer-read-only
-        (let ((terminal-point (eat-term-display-cursor eat-terminal)))
-          (set-window-point win terminal-point)
-          (cond
-           ((>= terminal-point (- (point-max) 2))
-            (with-selected-window win
-              (goto-char terminal-point)
-              (recenter -1)))
-           ((not (pos-visible-in-window-p terminal-point win))
-            (with-selected-window win
-              (goto-char terminal-point)
-              (recenter)))))))))
+      (let ((terminal-point (eat-term-display-cursor eat-terminal)))
+        (set-window-point win terminal-point)
+        (with-selected-window win
+          (goto-char terminal-point)
+          (recenter
+           (- (how-many "\n" (eat-term-display-beginning eat-terminal)
+                        terminal-point)
+              (cdr (eat-term-size eat-terminal))
+              (max 0 (- (floor (window-screen-lines))
+                        (cdr (eat-term-size eat-terminal)))))))))))
 
 ;;; Session Helpers
 
