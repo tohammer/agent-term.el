@@ -401,15 +401,17 @@ terminal model and process dimensions in sync."
    ((copilot-ide--terminal-scroll-mode-active-p)
     nil)
    (t
-    (let ((dimensions-stable t))
-      (dolist (win (window-list))
-        (when-let* ((buf (window-buffer win))
-                    ((copilot-ide--session-buffer-p buf)))
-          (let* ((new-width (window-width win))
-                 (cached-width (window-parameter win 'copilot-ide-cached-width)))
-            (unless (eql new-width cached-width)
-              (setq dimensions-stable nil)
-              (set-window-parameter win 'copilot-ide-cached-width new-width)))))
+    (let ((dimensions-stable t)
+          (current-buf (current-buffer)))
+      ;; Only check windows showing THIS buffer, not all session windows.
+      ;; Otherwise resizing one session's window updates another session's
+      ;; cache, causing the second session's resize to be suppressed.
+      (dolist (win (get-buffer-window-list current-buf nil t))
+        (let* ((new-width (window-width win))
+               (cached-width (window-parameter win 'copilot-ide-cached-width)))
+          (unless (eql new-width cached-width)
+            (setq dimensions-stable nil)
+            (set-window-parameter win 'copilot-ide-cached-width new-width))))
       (if dimensions-stable
           ;; Height-only change: skip the original function entirely so that
           ;; eat-term-resize is NOT called either, keeping eat's model and
