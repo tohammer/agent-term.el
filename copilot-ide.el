@@ -331,6 +331,10 @@ rendering until a quiet moment.  PROCESS and INPUT are passed through."
             (let ((width (max (window-max-chars-per-line) 1))
                   (height (max (floor (window-screen-lines)) 1))
                   (inhibit-read-only t))
+              ;; Update cached width to prevent reflow filter from blocking
+              ;; subsequent height-only resizes
+              (set-window-parameter window 'copilot-ide-cached-width
+                                    (window-width window))
               (eat-term-resize eat-terminal width height)
               (eat-term-redisplay eat-terminal))))
          (t
@@ -393,15 +397,15 @@ by their normal Emacs global binding instead of forwarding to the terminal."
 
 (defun copilot-ide--terminal-reflow-filter (original-fn &rest args)
   "Wrap ORIGINAL-FN to suppress height-only terminal reflows.
-For eat, skip entirely when only height changed to keep the eat
-terminal model and process dimensions in sync."
+For height-only changes, we still resize the terminal and notify the process,
+but skip the synchronize-scroll that causes view jumping."
   (cond
    ((not (copilot-ide--session-buffer-p (current-buffer)))
     (apply original-fn args))
    ((copilot-ide--terminal-scroll-mode-active-p)
     nil)
    (t
-    (let ((dimensions-stable t)
+    (let ((height-only-change t)
           (current-buf (current-buffer)))
       ;; Only check windows showing THIS buffer, not all session windows.
       ;; Otherwise resizing one session's window updates another session's
@@ -410,14 +414,17 @@ terminal model and process dimensions in sync."
         (let* ((new-width (window-width win))
                (cached-width (window-parameter win 'copilot-ide-cached-width)))
           (unless (eql new-width cached-width)
-            (setq dimensions-stable nil)
+            (setq height-only-change nil)
             (set-window-parameter win 'copilot-ide-cached-width new-width))))
-      (if dimensions-stable
-          ;; Height-only change: skip the original function entirely so that
-          ;; eat-term-resize is NOT called either, keeping eat's model and
-          ;; the process in agreement on the terminal dimensions.
-          nil
-        (apply original-fn args))))))
+      (if (not height-only-change)
+          ;; Width changed: call original function for full resize
+          (apply original-fn args)
+        ;; Height-only change: do the resize but skip synchronize-scroll.
+        ;; We temporarily replace eat--synchronize-scroll-function to no-op.
+        (when (and (eq copilot-ide-terminal-backend 'eat)
+                   (bound-and-true-p eat-terminal))
+          (let ((eat--synchronize-scroll-function #'ignore))
+            (apply original-fn args))))))))
 
 ;;; eat position keeper
 
