@@ -185,6 +185,74 @@ batches them into a single redisplay update."
   :type 'number
   :group 'copilot-ide)
 
+(defcustom copilot-ide-mcp-available-tools nil
+  "List of MCP tools to whitelist (only these tools will be available).
+When non-nil, Copilot will only have access to the specified tools.
+When nil, all tools are available (unless blacklisted).
+
+Format: Each entry can be:
+  - \"ServerName\" - whitelist all tools from that MCP server
+  - \"ServerName(tool_name)\" - whitelist a specific tool from a server
+
+Examples:
+  (\"my-server\" \"other-server(some_tool)\")
+  - Whitelists all tools from my-server
+  - Whitelists only some_tool from other-server
+
+Note: This uses `--available-tools' CLI flag which controls model access.
+For permission-based control (auto-approve), see `copilot-ide-mcp-allow-tools'."
+  :type '(repeat string)
+  :group 'copilot-ide)
+
+(defcustom copilot-ide-mcp-excluded-tools nil
+  "List of MCP tools to blacklist (these tools will not be available).
+When non-nil, Copilot will not have access to the specified tools.
+
+Format: Each entry can be:
+  - \"ServerName\" - blacklist all tools from that MCP server
+  - \"ServerName(tool_name)\" - blacklist a specific tool from a server
+
+Examples:
+  (\"untrusted-server\" \"other-server(dangerous_tool)\")
+  - Blacklists all tools from untrusted-server
+  - Blacklists only dangerous_tool from other-server
+
+Note: This uses `--excluded-tools' CLI flag which controls model access."
+  :type '(repeat string)
+  :group 'copilot-ide)
+
+(defcustom copilot-ide-mcp-allow-tools nil
+  "List of MCP tools to auto-approve (no confirmation prompt).
+These tools will execute without asking for permission.
+
+Format: Each entry can be:
+  - \"ServerName\" - auto-approve all tools from that MCP server
+  - \"ServerName(tool_name)\" - auto-approve a specific tool from a server
+
+Examples:
+  (\"trusted-server\" \"other-server(safe_read_tool)\")
+
+Note: This uses `--allow-tool' CLI flag which controls permissions,
+not availability. Tools must also be available (not excluded)."
+  :type '(repeat string)
+  :group 'copilot-ide)
+
+(defcustom copilot-ide-mcp-deny-tools nil
+  "List of MCP tools to always deny (will prompt but block execution).
+These tools will be denied even if explicitly requested.
+
+Format: Each entry can be:
+  - \"ServerName\" - deny all tools from that MCP server
+  - \"ServerName(tool_name)\" - deny a specific tool from a server
+
+Examples:
+  (\"any-server(destructive_tool)\" \"other-server(unsafe_write)\")
+
+Note: This uses `--deny-tool' CLI flag which takes precedence
+over `--allow-tool'."
+  :type '(repeat string)
+  :group 'copilot-ide)
+
 (defvar-local copilot-ide--vterm-render-queue nil
   "Pending output strings for batched vterm rendering (reverse order).")
 
@@ -608,6 +676,24 @@ RESUME, if non-nil, adds --resume (optionally with a session ID string)."
     (when (and copilot-ide-cli-extra-flags
                (not (string-empty-p copilot-ide-cli-extra-flags)))
       (setq cmd (concat cmd " " copilot-ide-cli-extra-flags)))
+    ;; MCP tool filtering: availability control
+    (when copilot-ide-mcp-available-tools
+      (setq cmd (concat cmd " --available-tools="
+                        (mapconcat #'shell-quote-argument
+                                   copilot-ide-mcp-available-tools ","))))
+    (when copilot-ide-mcp-excluded-tools
+      (setq cmd (concat cmd " --excluded-tools="
+                        (mapconcat #'shell-quote-argument
+                                   copilot-ide-mcp-excluded-tools ","))))
+    ;; MCP tool filtering: permission control
+    (when copilot-ide-mcp-allow-tools
+      (setq cmd (concat cmd " --allow-tool="
+                        (mapconcat #'shell-quote-argument
+                                   copilot-ide-mcp-allow-tools ","))))
+    (when copilot-ide-mcp-deny-tools
+      (setq cmd (concat cmd " --deny-tool="
+                        (mapconcat #'shell-quote-argument
+                                   copilot-ide-mcp-deny-tools ","))))
     ;; MCP config injection
     (when (copilot-ide-mcp-server-ensure-server)
       (when-let* ((config (copilot-ide-mcp-server-get-config session-id)))
