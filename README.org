@@ -5,7 +5,7 @@
 
 Emacs integration for the [[https://docs.github.com/copilot/concepts/agents/about-copilot-cli][GitHub Copilot CLI]]. Runs =copilot= in a terminal buffer (=vterm= or =eat=) inside a side window. Optionally exposes an HTTP MCP server so Copilot can call Emacs functions (xref, imenu, tree-sitter) during a session.
 
-Heavily inspired by [[https://github.com/manzaltu/claude-code-ide.el][claude-code-ide.el]] by manzaltu.
+Heavily inspired by and based on [[https://github.com/manzaltu/claude-code-ide.el][claude-code-ide.el]] by Yoav Orot (manzaltu), used under GPL-3.0.
 
 * Requirements
 
@@ -125,6 +125,12 @@ Each accepts a list of strings in the form ="ServerName"= (all tools) or ="Serve
 #+end_src
 
 Or use the transient menu: =M-x copilot-ide-menu=.
+
+* License
+
+GPL-3.0. See [[file:LICENSE][LICENSE]].
+
+This package is based on [[https://github.com/manzaltu/claude-code-ide.el][claude-code-ide.el]] by Yoav Orot, Copyright (C) 2025 Yoav Orot, used under GPL-3.0.
 
 * AI Disclaimer
 

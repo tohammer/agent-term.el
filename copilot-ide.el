@@ -2,9 +2,10 @@
 
 ;; Author: Tobias Hammer <tohammer@users.noreply.github.com>
 ;; Maintainer: Tobias Hammer <tohammer@users.noreply.github.com>
-;; Copyright (C) 2025
+;; Copyright (C) 2025 Tobias Hammer
+;; Copyright (C) 2025 Yoav Orot
 
-;; Based on claude-code-ide.el by manzaltu
+;; Based on claude-code-ide.el by Yoav Orot (manzaltu)
 ;; https://github.com/manzaltu/claude-code-ide.el
 
 ;; Version: 0.1.0

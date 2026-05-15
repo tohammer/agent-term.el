@@ -1,6 +1,10 @@
 ;;; copilot-ide-emacs-tools.el --- Emacs MCP tools for Copilot CLI  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025
+;; Copyright (C) 2025 Tobias Hammer
+;; Copyright (C) 2025 Yoav Orot
+
+;; Based on claude-code-ide.el by Yoav Orot (manzaltu)
+;; https://github.com/manzaltu/claude-code-ide.el
 
 ;; Keywords: ai, copilot, mcp, tools, xref, emacs
 
