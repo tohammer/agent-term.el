@@ -1,207 +1,131 @@
-#+TITLE: Copilot CLI for Emacs
-#+DESCRIPTION: GitHub Copilot CLI integration for Emacs
-#+KEYWORDS: emacs, copilot, ai, code-assistant, mcp
-#+OPTIONS: toc:t num:nil
-
-[[https://www.gnu.org/software/emacs/][file:https://img.shields.io/badge/GNU%20Emacs-28--30-blueviolet.svg]]
-[[https://www.gnu.org/licenses/gpl-3.0][file:https://img.shields.io/badge/License-GPL%20v3-blue.svg]]
+#+TITLE: copilot-ide.el
+#+OPTIONS: toc:nil num:nil
 
 * Overview
 
-=copilot-cli.el= integrates the [[https://docs.github.com/copilot/concepts/agents/about-copilot-cli][GitHub Copilot CLI]] into Emacs. It runs
-=copilot= in a terminal buffer (=vterm= or =eat=), displayed in a configurable
-side window, and optionally connects an HTTP MCP server so Copilot can call
-Emacs functions such as xref, imenu, and tree-sitter directly.
+Emacs integration for the [[https://docs.github.com/copilot/concepts/agents/about-copilot-cli][GitHub Copilot CLI]]. Runs =copilot= in a terminal buffer (=vterm= or =eat=) inside a side window. Optionally exposes an HTTP MCP server so Copilot can call Emacs functions (xref, imenu, tree-sitter) during a session.
 
-** Features
-
-- Project-aware session management (one session per project root)
-- Terminal integration with full color support via =vterm= or =eat=
-- Optional HTTP MCP tools server exposing Emacs functionality to Copilot
-- Extensible: register any Elisp function as an MCP tool with =copilot-cli-make-tool=
-- Transient menu for quick access to all commands
-- Multiple concurrent sessions (one per project)
-
-** What This Package Does NOT Do
-
-The following features from =claude-code-ide.el= are absent because they
-require Claude Code CLI's proprietary bidirectional WebSocket IDE mode, which
-Copilot CLI does not have:
-
-- Live cursor/selection push to Copilot (=selection_changed= notifications)
-- Copilot-initiated file opening (=openFile= tool)
-- Copilot-initiated ediff sessions (=openDiff= / =closeTab= tools)
-- Elisp evaluation from Copilot (=executeCode= tool)
-- Flycheck/Flymake diagnostics on demand (=getDiagnostics= tool)
-- Inline context injection (=at_mentioned= notifications)
-
-See [[file:copilot-port.md][copilot-port.md]] for a detailed analysis of what is and is not portable.
+Heavily inspired by [[https://github.com/manzaltu/claude-code-ide.el][claude-code-ide.el]] by manzaltu.
 
 * Requirements
 
-- Emacs 28.1 or later
-- [[https://docs.github.com/copilot/concepts/agents/about-copilot-cli][GitHub Copilot CLI]] (=copilot= on =PATH=, with an active Copilot subscription)
-- One of:
-  - [[https://github.com/akermu/emacs-libvterm][vterm]] (recommended)
-  - [[https://codeberg.org/akib/emacs-eat][eat]]
-- =transient= ≥ 0.9.0 (usually bundled with Emacs 29+)
-- =web-server= (for MCP tools — install via =M-x package-install RET web-server=)
+- Emacs 28.1+
+- [[https://docs.github.com/copilot/concepts/agents/about-copilot-cli][GitHub Copilot CLI]] (=copilot= on =PATH=)
+- =vterm= or =eat= (terminal backend)
+- =transient= >= 0.9.0
+- =web-server= (only for MCP tools server)
 
 * Installation
 
-** Manual
-
-Clone the repository and add to your load path:
+** use-package (Emacs 29+)
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "/path/to/copilot-cli.el/")
-(require 'copilot-cli)
+(use-package copilot-ide
+  :vc (:url "https://github.com/tohammer/copilot-ide.el")
+  :commands (copilot-ide copilot-ide-menu))
 #+end_src
 
-** With use-package
+** Doom Emacs
+
+In =packages.el=:
 
 #+begin_src emacs-lisp
-(use-package copilot-cli
-  :load-path "/path/to/copilot-cli.el/"
-  :commands (copilot-cli copilot-cli-menu))
+(package! copilot-ide
+  :recipe (:host github :repo "tohammer/copilot-ide.el"))
 #+end_src
 
-* Basic Usage
+In =config.el=:
 
-| Command                       | Description                                       |
-|-------------------------------+---------------------------------------------------|
-| =M-x copilot-cli=             | Start a session (or toggle the window)            |
-| =M-x copilot-cli-stop=        | Stop the session for the current project          |
-| =M-x copilot-cli-switch-to-buffer= | Focus the Copilot buffer                     |
-| =M-x copilot-cli-list-sessions= | Pick from all running sessions                  |
-| =M-x copilot-cli-send-prompt= | Send a prompt from the minibuffer                 |
-| =M-x copilot-cli-send-escape= | Send Escape to the Copilot terminal               |
-| =M-x copilot-cli-insert-newline= | Insert a newline in the Copilot prompt          |
-| =M-x copilot-cli-toggle=      | Toggle the Copilot window for the current project |
-| =M-x copilot-cli-toggle-recent= | Toggle the most recently used session           |
-| =M-x copilot-cli-check-status= | Check CLI availability and version               |
-| =M-x copilot-cli-menu=        | Open the transient menu                           |
+#+begin_src emacs-lisp
+(use-package! copilot-ide
+  :commands (copilot-ide copilot-ide-menu))
+#+end_src
 
-Within the terminal buffer:
+* Usage
 
-| Key         | Description            |
-|-------------+------------------------|
-| =S-<return>= | Insert newline in prompt |
-| =C-<escape>= | Send Escape            |
+| Command                          | Description                                      |
+|----------------------------------+--------------------------------------------------|
+| =M-x copilot-ide=                | Start or toggle session for current project      |
+| =M-x copilot-ide-stop=           | Stop the current session                         |
+| =M-x copilot-ide-toggle=         | Toggle the session window                        |
+| =M-x copilot-ide-toggle-recent=  | Toggle the most recently used session            |
+| =M-x copilot-ide-switch-to-buffer= | Focus the Copilot terminal buffer              |
+| =M-x copilot-ide-list-sessions=  | Pick from all running sessions                   |
+| =M-x copilot-ide-send-prompt=    | Send a prompt from the minibuffer                |
+| =M-x copilot-ide-resume=         | Resume a previous session (optional session ID)  |
+| =M-x copilot-ide-check-status=   | Check CLI availability and version               |
+| =M-x copilot-ide-menu=           | Open the transient menu                          |
 
 * Configuration
 
-** Minimal setup (terminal only)
+** Basic
 
 #+begin_src emacs-lisp
-(require 'copilot-cli)
-
-;; Optional: bind the transient menu
-(global-set-key (kbd "C-c o") #'copilot-cli-menu)
+(use-package copilot-ide
+  :commands (copilot-ide copilot-ide-menu)
+  :bind ("C-c o" . copilot-ide-menu))
 #+end_src
 
 ** With Emacs MCP tools
 
-Enable this to let Copilot call xref, imenu, tree-sitter, and project
-information from inside your Emacs session:
+Exposes xref, imenu, tree-sitter, and project info as MCP tools to Copilot:
 
 #+begin_src emacs-lisp
-(require 'copilot-cli)
-(copilot-cli-emacs-tools-setup)  ; enables MCP server + registers all tools
-
-(global-set-key (kbd "C-c o") #'copilot-cli-menu)
+(use-package copilot-ide
+  :config
+  (copilot-ide-emacs-tools-setup))
 #+end_src
 
-Copilot CLI will receive the MCP server URL via =--mcp-config= at startup.
-
-** Adding custom MCP tools
-
-Any Elisp function can be exposed as an MCP tool:
+** Custom MCP tools
 
 #+begin_src emacs-lisp
-(copilot-cli-make-tool
- :name "my_custom_search"
- :function #'my-search-function
- :description "Search something in the project"
- :args '((:name "query"
-                :type string
-                :description "The search query")))
+(copilot-ide-make-tool
+ :name "my_search"
+ :function #'my-search-fn
+ :description "Search in project"
+ :args '((:name "query" :type string :description "Search query")))
 #+end_src
 
 * Customization
 
-| Variable                         | Default    | Description                                 |
-|----------------------------------+------------+---------------------------------------------|
-| =copilot-cli-cli-path=           | ="copilot"= | Path to the Copilot CLI executable          |
-| =copilot-cli-terminal-backend=   | ='vterm=   | Terminal backend: ='vterm= or ='eat=        |
-| =copilot-cli-window-side=        | ='right=   | Side for the Copilot window                 |
-| =copilot-cli-window-width=       | =100=      | Width of the side window (left/right)       |
-| =copilot-cli-window-height=      | =20=       | Height of the side window (top/bottom)      |
-| =copilot-cli-focus-on-open=      | =t=        | Focus the window when opened                |
-| =copilot-cli-use-side-window=    | =t=        | Use a dedicated side window                 |
-| =copilot-cli-cli-extra-flags=    | =""=       | Extra flags passed to =copilot= at launch   |
-| =copilot-cli-enable-mcp-server=  | =nil=      | Enable the HTTP MCP tools server            |
-| =copilot-cli-mcp-server-port=    | =nil=      | Fixed HTTP server port (nil = auto)         |
-| =copilot-cli-debug=              | =nil=      | Enable Emacs-side debug logging             |
+** Session / window
 
-* Architecture
+| Variable                               | Default    | Description                                      |
+|----------------------------------------+------------+--------------------------------------------------|
+| =copilot-ide-cli-path=                 | ="copilot"= | Path to the Copilot CLI executable               |
+| =copilot-ide-cli-extra-flags=          | =""=       | Extra flags passed to =copilot= at launch        |
+| =copilot-ide-terminal-backend=         | ='vterm=   | Terminal backend: ='vterm= or ='eat=             |
+| =copilot-ide-window-side=              | ='right=   | Side for the Copilot window                      |
+| =copilot-ide-window-width=             | =100=      | Width of the side window (left/right sides)      |
+| =copilot-ide-window-height=            | =20=       | Height of the side window (top/bottom sides)     |
+| =copilot-ide-focus-on-open=            | =t=        | Focus the window when opened                     |
+| =copilot-ide-use-side-window=          | =t=        | Use a dedicated side window                      |
+| =copilot-ide-show-modeline=            | =t=        | Show the mode line in the Copilot buffer         |
+| =copilot-ide-enable-mcp-server=        | =nil=      | Enable the HTTP MCP tools server                 |
+| =copilot-ide-mcp-server-port=          | =nil=      | Fixed HTTP server port (nil = auto-assign)       |
 
-#+begin_example
-┌─────────────────────────────────────────────────────────┐
-│ Emacs                                                   │
-│                                                         │
-│  ┌──────────────────┐    side    ┌───────────────────┐  │
-│  │  Source buffers  │   window   │  Copilot terminal │  │
-│  │  (your code)     │           │  (vterm / eat)    │  │
-│  └──────────────────┘           └───────────────────┘  │
-│                                          │              │
-│  ┌──────────────────────────────────┐    │              │
-│  │  HTTP MCP Tools Server           │◄───┘              │
-│  │  /mcp/{session-id}               │  --mcp-config     │
-│  │                                  │                   │
-│  │  Tools:                          │                   │
-│  │  • copilot_cli_xref_find_references                  │
-│  │  • copilot_cli_xref_find_apropos                     │
-│  │  • copilot_cli_project_info                          │
-│  │  • copilot_cli_imenu_list_symbols                    │
-│  │  • copilot_cli_treesit_info                          │
-│  └──────────────────────────────────┘                   │
-└─────────────────────────────────────────────────────────┘
-#+end_example
+** MCP tool filtering
 
-Copilot CLI connects to the HTTP MCP server as an MCP client whenever it
-needs to invoke an Emacs tool.  Session IDs in the URL path (=/mcp/{id}=)
-allow multiple concurrent sessions to each get their own Emacs buffer
-context.
+| Variable                               | CLI flag               | Description                                      |
+|----------------------------------------+------------------------+--------------------------------------------------|
+| =copilot-ide-mcp-available-tools=      | =--available-tools=    | Whitelist specific tools or servers              |
+| =copilot-ide-mcp-excluded-tools=       | =--excluded-tools=     | Blacklist specific tools or servers              |
+| =copilot-ide-mcp-allow-tools=          | =--allow-tool=         | Auto-approve (no confirmation prompt)            |
+| =copilot-ide-mcp-deny-tools=           | =--deny-tool=          | Always deny (takes precedence over allow)        |
 
-The last active buffer per session is tracked automatically via
-=post-command-hook=, so MCP tools always operate in the correct project
-context.
-
-* MCP Tools Reference
-
-| Tool name                          | Description                                       |
-|------------------------------------+---------------------------------------------------|
-| =copilot_cli_xref_find_references= | Find usages of an identifier via xref/LSP         |
-| =copilot_cli_xref_find_apropos=    | Search symbols by pattern via xref/LSP            |
-| =copilot_cli_project_info=         | Project directory, active buffer, file count      |
-| =copilot_cli_imenu_list_symbols=   | All functions/classes/vars in a file with lines   |
-| =copilot_cli_treesit_info=         | Tree-sitter AST node info for a file or position  |
+Each accepts a list of strings in the form ="ServerName"= (all tools) or ="ServerName(tool_name)"= (specific tool).
 
 * Debugging
 
-Enable debug logging to trace MCP communication:
-
 #+begin_src emacs-lisp
-(setq copilot-cli-debug t)
-;; View log:
-(copilot-cli-show-debug)
-;; Clear log:
-(copilot-cli-clear-debug)
+(setq copilot-ide-debug t)
+;; Then:
+(copilot-ide-show-debug)
+(copilot-ide-clear-debug)
 #+end_src
 
-Or toggle it via the transient menu: =M-x copilot-cli-menu= → =d= → =d=.
+Or use the transient menu: =M-x copilot-ide-menu=.
 
-* License
+* AI Disclaimer
 
-GPL v3 — see [[file:LICENSE][LICENSE]].
+This package was developed with the help of AI coding agents.

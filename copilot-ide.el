@@ -1,11 +1,16 @@
 ;;; copilot-ide.el --- GitHub Copilot CLI integration for Emacs  -*- lexical-binding: t; -*-
 
+;; Author: Tobias Hammer <tohammer@users.noreply.github.com>
+;; Maintainer: Tobias Hammer <tohammer@users.noreply.github.com>
 ;; Copyright (C) 2025
+
+;; Based on claude-code-ide.el by manzaltu
+;; https://github.com/manzaltu/claude-code-ide.el
 
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1") (transient "0.9.0") (web-server "0.1.2"))
 ;; Keywords: ai, copilot, mcp, assistant
-;; URL: https://github.com/manzaltu/copilot-ide.el
+;; URL: https://github.com/tohammer/copilot-ide.el
 
 ;; This file is not part of GNU Emacs.
 
