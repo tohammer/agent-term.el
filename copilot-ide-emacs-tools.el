@@ -7,6 +7,7 @@
 ;; https://github.com/manzaltu/claude-code-ide.el
 
 ;; Keywords: ai, copilot, mcp, tools, xref, emacs
+;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is not part of GNU Emacs.
 

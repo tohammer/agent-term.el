@@ -3,6 +3,7 @@
 ;; Copyright (C) 2025
 
 ;; Keywords: ai, copilot, mcp, http
+;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is not part of GNU Emacs.
 

@@ -11,6 +11,7 @@
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1") (transient "0.9.0") (web-server "0.1.2"))
 ;; Keywords: ai, copilot, mcp, assistant
+;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; URL: https://github.com/tohammer/copilot-ide.el
 
 ;; This file is not part of GNU Emacs.
