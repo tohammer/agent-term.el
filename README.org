@@ -3,7 +3,7 @@
 
 * Overview
 
-Emacs integration for the [[https://docs.github.com/copilot/concepts/agents/about-copilot-cli][GitHub Copilot CLI]]. Runs =copilot= in a terminal buffer (=vterm= or =eat=) inside a side window. Optionally exposes an HTTP MCP server so Copilot can call Emacs functions (xref, imenu, tree-sitter) during a session.
+Emacs integration for the [[https://docs.github.com/copilot/concepts/agents/about-copilot-cli][GitHub Copilot CLI]]. Runs =copilot= in a terminal buffer (=vterm=, =eat=, or =ghostel=) inside a side window. Optionally exposes an HTTP MCP server so Copilot can call Emacs functions (xref, imenu, tree-sitter) during a session.
 
 Heavily inspired by and based on [[https://github.com/manzaltu/claude-code-ide.el][claude-code-ide.el]] by Yoav Orot (manzaltu), used under GPL-3.0.
 
@@ -11,7 +11,7 @@ Heavily inspired by and based on [[https://github.com/manzaltu/claude-code-ide.e
 
 - Emacs 28.1+
 - [[https://docs.github.com/copilot/concepts/agents/about-copilot-cli][GitHub Copilot CLI]] (=copilot= on =PATH=)
-- =vterm= or =eat= (terminal backend)
+- =vterm=, =eat=, or =ghostel= (terminal backend)
 - =transient= >= 0.9.0
 - =web-server= (only for MCP tools server)
 
@@ -94,7 +94,7 @@ Exposes xref, imenu, tree-sitter, and project info as MCP tools to Copilot:
 |----------------------------------------+------------+--------------------------------------------------|
 | =copilot-ide-cli-path=                 | ="copilot"= | Path to the Copilot CLI executable               |
 | =copilot-ide-cli-extra-flags=          | =""=       | Extra flags passed to =copilot= at launch        |
-| =copilot-ide-terminal-backend=         | ='vterm=   | Terminal backend: ='vterm= or ='eat=             |
+| =copilot-ide-terminal-backend=         | ='vterm=   | Terminal backend: ='vterm=, ='eat=, or ='ghostel= |
 | =copilot-ide-window-side=              | ='right=   | Side for the Copilot window                      |
 | =copilot-ide-window-width=             | =100=      | Width of the side window (left/right sides)      |
 | =copilot-ide-window-height=            | =20=       | Height of the side window (top/bottom sides)     |

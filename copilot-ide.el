@@ -83,6 +83,13 @@
 (declare-function eat-term-redisplay "eat" (terminal))
 (declare-function eat--adjust-process-window-size "eat" (process windows))
 
+;; External variable/function declarations for ghostel
+(defvar ghostel-kill-buffer-on-exit)
+(defvar ghostel-environment)
+(defvar ghostel--input-mode)
+(declare-function ghostel-exec "ghostel" (buffer program &optional args identity))
+(declare-function ghostel-send-string "ghostel" (string))
+
 ;;; Customization
 
 (defgroup copilot-ide nil
@@ -141,9 +148,10 @@ this option overrides that behaviour."
 
 (defcustom copilot-ide-terminal-backend 'vterm
   "Terminal backend to use for running Copilot CLI.
-Either `vterm' or `eat'."
+Either `vterm', `eat', or `ghostel'."
   :type '(choice (const :tag "vterm" vterm)
-                 (const :tag "eat" eat))
+                 (const :tag "eat" eat)
+                 (const :tag "ghostel" ghostel))
   :group 'copilot-ide)
 
 (defcustom copilot-ide-terminal-initialization-delay 0.1
@@ -367,8 +375,12 @@ rendering until a quiet moment.  PROCESS and INPUT are passed through."
     (unless (featurep 'eat) (require 'eat nil t))
     (unless (featurep 'eat)
       (user-error "eat is not installed.  Install it or set `copilot-ide-terminal-backend' to 'vterm")))
+   ((eq copilot-ide-terminal-backend 'ghostel)
+    (unless (featurep 'ghostel) (require 'ghostel nil t))
+    (unless (featurep 'ghostel)
+      (user-error "ghostel is not installed.  Install it or set `copilot-ide-terminal-backend' to 'vterm or 'eat")))
    (t
-    (user-error "Invalid terminal backend: %s.  Use 'vterm or 'eat" copilot-ide-terminal-backend))))
+    (user-error "Invalid terminal backend: %s.  Use 'vterm, 'eat, or 'ghostel" copilot-ide-terminal-backend))))
 
 (defun copilot-ide--terminal-send-string (string)
   "Send STRING to the terminal in the current buffer."
@@ -376,6 +388,7 @@ rendering until a quiet moment.  PROCESS and INPUT are passed through."
    ((eq copilot-ide-terminal-backend 'vterm) (vterm-send-string string))
    ((eq copilot-ide-terminal-backend 'eat)
     (when eat-terminal (eat-term-send-string eat-terminal string)))
+   ((eq copilot-ide-terminal-backend 'ghostel) (ghostel-send-string string))
    (t (error "Unknown terminal backend: %s" copilot-ide-terminal-backend))))
 
 (defun copilot-ide--terminal-send-escape ()
@@ -384,7 +397,28 @@ rendering until a quiet moment.  PROCESS and INPUT are passed through."
    ((eq copilot-ide-terminal-backend 'vterm) (vterm-send-escape))
    ((eq copilot-ide-terminal-backend 'eat)
     (when eat-terminal (eat-term-send-string eat-terminal "\e")))
+   ((eq copilot-ide-terminal-backend 'ghostel) (ghostel-send-string "\e"))
    (t (error "Unknown terminal backend: %s" copilot-ide-terminal-backend))))
+
+(defun copilot-ide--ghostel-forward-c-underscore ()
+  "Forward C-_ to the ghostel terminal in input modes, else run its usual command.
+C-_ is not in ghostel's default `ghostel-keymap-exceptions', so ghostel's own
+local keymap forwards it to the terminal -- but that local map sits below
+`minor-mode-map-alist' in Emacs's key lookup, so any other active global minor
+mode bound to C-_ (e.g. undo-related modes) shadows it before it ever reaches
+ghostel.  Reasserting the forward here, ahead of `minor-mode-map-alist' via
+`minor-mode-overriding-map-alist', lets Copilot's own undo (rather than
+Emacs's) receive C-_ while typing in the terminal.
+
+Note: as of Copilot CLI 1.0.80, its input-line editor does not actually
+implement undo -- C-_ reaches the CLI correctly but is a no-op there, even in
+a plain native terminal outside Emacs.  See
+https://github.com/github/copilot-cli/issues/941."
+  (interactive)
+  (if (memq ghostel--input-mode '(semi-char char))
+      (ghostel-send-string (string ?\C-_))
+    (when-let* ((binding (global-key-binding (kbd "C-_"))))
+      (call-interactively binding))))
 
 (defun copilot-ide--terminal-send-return ()
   "Send return to the terminal in the current buffer."
@@ -392,11 +426,15 @@ rendering until a quiet moment.  PROCESS and INPUT are passed through."
    ((eq copilot-ide-terminal-backend 'vterm) (vterm-send-return))
    ((eq copilot-ide-terminal-backend 'eat)
     (when eat-terminal (eat-term-send-string eat-terminal "\r")))
+   ((eq copilot-ide-terminal-backend 'ghostel) (ghostel-send-string "\r"))
    (t (error "Unknown terminal backend: %s" copilot-ide-terminal-backend))))
 
 (defun copilot-ide--sync-terminal-dimensions (buffer window)
-  "Sync the terminal process dimensions in BUFFER to match WINDOW."
-  (when (and buffer window (buffer-live-p buffer) (window-live-p window))
+  "Sync the terminal process dimensions in BUFFER to match WINDOW.
+Ghostel resizes itself automatically via its own buffer-local
+`window-size-change-functions' hook, so no action is taken here for it."
+  (when (and buffer window (buffer-live-p buffer) (window-live-p window)
+             (not (eq copilot-ide-terminal-backend 'ghostel)))
     (with-current-buffer buffer
       (when-let* ((proc (get-buffer-process buffer)))
         (cond
@@ -416,6 +454,11 @@ rendering until a quiet moment.  PROCESS and INPUT are passed through."
           (set-process-window-size proc
                                    (window-body-height window)
                                    (window-body-width window))))))))
+
+(defvar-local copilot-ide--ghostel-keybinding-override nil
+  "Non-nil activates `copilot-ide' key forwarding overrides in ghostel buffers.
+Used only as a dummy key into `minor-mode-overriding-map-alist'; see
+`copilot-ide--setup-terminal-keybindings'.")
 
 (defun copilot-ide--setup-terminal-keybindings ()
   "Bind Copilot-specific keys in the current terminal buffer.
@@ -444,6 +487,29 @@ by their normal Emacs global binding instead of forwarding to the terminal."
           (define-key override-map (kbd key) binding)))
       (setq-local minor-mode-overriding-map-alist
                   (cons (cons 'eat--semi-char-mode override-map)
+                        minor-mode-overriding-map-alist))))
+  ;; For ghostel, input modes (semi-char/char/etc.) are switched via
+  ;; `use-local-map', repeatedly replacing the buffer-local keymap, so
+  ;; `local-set-key' bindings above get discarded on the next mode switch.
+  ;; Unlike eat, ghostel's per-mode keymaps are not registered in
+  ;; `minor-mode-map-alist', so a fresh (unrelated) symbol here is simply
+  ;; added to the search ahead of the local keymap, rather than replacing
+  ;; an existing entry -- no parent keymap is needed for other keys to
+  ;; keep falling through to ghostel's own forwarding logic.
+  (when (eq copilot-ide-terminal-backend 'ghostel)
+    (setq-local copilot-ide--ghostel-keybinding-override t)
+    (let ((override-map (make-sparse-keymap)))
+      (define-key override-map (kbd "S-<return>") #'copilot-ide-insert-newline)
+      (define-key override-map (kbd "C-<escape>") #'copilot-ide-send-escape)
+      ;; C-_ is meant to reach Copilot CLI's own undo, but other active
+      ;; global minor modes bound to C-_ would otherwise shadow ghostel's
+      ;; own (lower-priority, local-map-based) forwarding of it.
+      (define-key override-map (kbd "C-_") #'copilot-ide--ghostel-forward-c-underscore)
+      (dolist (key copilot-ide-emacs-keybindings)
+        (when-let* ((binding (global-key-binding (kbd key))))
+          (define-key override-map (kbd key) binding)))
+      (setq-local minor-mode-overriding-map-alist
+                  (cons (cons 'copilot-ide--ghostel-keybinding-override override-map)
                         minor-mode-overriding-map-alist)))))
 
 ;;; Reflow Glitch Prevention
@@ -452,10 +518,13 @@ by their normal Emacs global binding instead of forwarding to the terminal."
 ;; which can trigger unwanted scrolling in terminal AI applications.
 
 (defun copilot-ide--terminal-resize-handler ()
-  "Return the terminal resize function for the active backend."
+  "Return the terminal resize function for the active backend, or nil.
+Nil means the backend needs no reflow-glitch workaround (e.g. ghostel,
+which manages its own resize/redraw synchronously)."
   (pcase copilot-ide-terminal-backend
     ('vterm #'vterm--window-adjust-process-window-size)
     ('eat #'eat--adjust-process-window-size)
+    ('ghostel nil)
     (_ (error "Unsupported terminal backend: %s" copilot-ide-terminal-backend))))
 
 (defun copilot-ide--terminal-scroll-mode-active-p ()
@@ -547,8 +616,8 @@ area is properly aligned within each window."
 (defun copilot-ide--set-process (process &optional directory)
   "Record PROCESS as the Copilot process for DIRECTORY (or current project)."
   (when (= (hash-table-count copilot-ide--processes) 0)
-    (advice-add (copilot-ide--terminal-resize-handler)
-                :around #'copilot-ide--terminal-reflow-filter))
+    (when-let* ((handler (copilot-ide--terminal-resize-handler)))
+      (advice-add handler :around #'copilot-ide--terminal-reflow-filter)))
   (puthash (or directory (copilot-ide--get-working-directory))
            process copilot-ide--processes))
 
@@ -627,8 +696,8 @@ area is properly aligned within each window."
         (progn
           (remhash directory copilot-ide--processes)
           (when (= (hash-table-count copilot-ide--processes) 0)
-            (advice-remove (copilot-ide--terminal-resize-handler)
-                           #'copilot-ide--terminal-reflow-filter)
+            (when-let* ((handler (copilot-ide--terminal-resize-handler)))
+              (advice-remove handler #'copilot-ide--terminal-reflow-filter))
             (remove-hook 'post-command-hook #'copilot-ide--track-active-buffer))
           ;; Notify MCP tools server
           (let ((session-id (gethash directory copilot-ide--session-ids)))
@@ -764,6 +833,22 @@ Returns a cons cell (buffer . process) on success."
             (unless process (error "Failed to create eat process"))
             (cons buffer process)))))
 
+     ((eq copilot-ide-terminal-backend 'ghostel)
+      (let* ((buffer (get-buffer-create buffer-name))
+             (cmd-parts (copilot-ide--parse-command-string cmd))
+             (program (car cmd-parts))
+             (args (cdr cmd-parts)))
+        (with-current-buffer buffer
+          ;; `ghostel-environment' is prepended to the spawned process's
+          ;; environment (earlier entries win), so this overrides ghostel's
+          ;; own TERM_PROGRAM default.
+          (setq-local ghostel-environment env-vars)
+          (setq-local ghostel-kill-buffer-on-exit t)
+          (ghostel-exec buffer program args)
+          (let ((process (get-buffer-process buffer)))
+            (unless process (error "Failed to create ghostel process"))
+            (cons buffer process)))))
+
      (t (error "Unknown terminal backend: %s" copilot-ide-terminal-backend)))))
 
 ;;; Session Start/Stop
@@ -828,7 +913,8 @@ RESUME, if non-nil, passes --resume (with optional session-id string)."
                             (lambda (&rest _)
                               (when (buffer-live-p buffer) (kill-buffer buffer)))
                             nil t))
-                 ((eq copilot-ide-terminal-backend 'eat) nil)))
+                 ((eq copilot-ide-terminal-backend 'eat) nil)
+                 ((eq copilot-ide-terminal-backend 'ghostel) nil)))
               (sleep-for copilot-ide-terminal-initialization-delay)
               (copilot-ide--display-buffer-in-side-window buffer)
               (copilot-ide-log "Copilot started in %s%s"
