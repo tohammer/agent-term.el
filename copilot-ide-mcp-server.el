@@ -1,4 +1,4 @@
-;;; copilot-ide-mcp-server.el --- MCP tools server for Copilot CLI  -*- lexical-binding: t; -*-
+;;; copilot-ide-mcp-server.el --- MCP tools server for AI coding agents  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025 Tobias Hammer
 ;; Copyright (C) 2025 Yoav Orot
@@ -6,7 +6,7 @@
 ;; Based on claude-code-ide.el by Yoav Orot (manzaltu)
 ;; https://github.com/manzaltu/claude-code-ide.el
 
-;; Keywords: ai, copilot, mcp, tools
+;; Keywords: ai, mcp, tools
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is not part of GNU Emacs.
@@ -26,10 +26,13 @@
 
 ;;; Commentary:
 
-;; HTTP MCP tools server that exposes Emacs functions to Copilot CLI.
-;; The server lifecycle is managed automatically:
-;; - Starts when the first Copilot session begins
-;; - Stops when the last Copilot session ends
+;; Registry of MCP tools and agent sessions, and the lifecycle of the
+;; HTTP MCP server that exposes the tools to the agents:
+;; - the server starts with the first session (if enabled),
+;; - it stops when the last session ends.
+;;
+;; Each session is registered under a random token.  The token is part
+;; of the endpoint URL handed to the agent and is the only way in.
 
 ;;; Code:
 
@@ -37,37 +40,33 @@
 (require 'json)
 (require 'copilot-ide-debug)
 
-;; Forward declarations
-(declare-function ws-process "web-server" (server))
 (declare-function copilot-ide-mcp-http-server-start "copilot-ide-mcp-http-server" (&optional port))
 (declare-function copilot-ide-mcp-http-server-stop "copilot-ide-mcp-http-server" (server))
 
 ;;; Customization
 
 (defgroup copilot-ide-mcp-server nil
-  "MCP tools server settings for Copilot CLI."
+  "MCP tools server settings."
   :group 'copilot-ide
   :prefix "copilot-ide-mcp-server-")
 
 (defcustom copilot-ide-enable-mcp-server nil
-  "Enable MCP tools server for exposing Emacs functions to Copilot.
-When enabled, a separate HTTP MCP server will be started to provide
-Copilot with access to configured Emacs functions."
+  "Enable the MCP tools server that exposes Emacs functions to the agent.
+When enabled, an HTTP MCP server on 127.0.0.1 provides the tools
+registered with `copilot-ide-make-tool' to every session."
   :type 'boolean
   :group 'copilot-ide-mcp-server)
 
 (defcustom copilot-ide-mcp-server-port nil
   "Port for the MCP tools server.
-If nil, a random available port will be selected automatically."
+If nil, a free port is selected automatically."
   :type '(choice (const :tag "Auto-select" nil)
                  (integer :tag "Fixed port"))
   :group 'copilot-ide-mcp-server)
 
-(defcustom copilot-ide-mcp-server-tools nil
-  "List of tool specifications to expose via the MCP tools server.
-Use `copilot-ide-make-tool' to register tools."
-  :type 'list
-  :group 'copilot-ide-mcp-server)
+(defvar copilot-ide-mcp-server-tools nil
+  "List of tool specifications exposed via the MCP tools server.
+Use `copilot-ide-make-tool' to register tools.")
 
 ;;; State Management
 
@@ -76,9 +75,6 @@ Use `copilot-ide-make-tool' to register tools."
 
 (defvar copilot-ide-mcp-server--port nil
   "The port the MCP tools server is running on.")
-
-(defvar copilot-ide-mcp-server--session-count 0
-  "Number of active Copilot sessions using the MCP tools server.")
 
 (defvar copilot-ide-mcp-server--sessions (make-hash-table :test 'equal)
   "Hash table mapping session IDs to session contexts.
@@ -92,8 +88,9 @@ Dynamically bound during tool execution.")
 
 (defun copilot-ide-make-tool (&rest slots)
   "Define an MCP tool and register it with the server.
+A tool registered earlier under the same name is replaced.
 
-Keyword arguments:
+SLOTS are keyword arguments:
   :name        - Tool name string (required)
   :function    - Elisp function to call (required)
   :description - Human-readable description (required)
@@ -102,6 +99,9 @@ Keyword arguments:
                    :type        - Type symbol (string, number, boolean, ...)
                    :description - Argument description
                    :optional    - Non-nil if argument is optional
+
+The function receives the arguments in the order of :args; a missing
+optional argument, JSON false and JSON null arrive as nil.
 
 Returns the tool specification."
   (let ((function (plist-get slots :function))
@@ -115,61 +115,66 @@ Returns the tool specification."
                       :name name
                       :description description)))
       (when args (setq spec (plist-put spec :args args)))
-      (add-to-list 'copilot-ide-mcp-server-tools spec)
+      (setq copilot-ide-mcp-server-tools
+            (append (cl-remove name copilot-ide-mcp-server-tools
+                               :key (lambda (s) (plist-get s :name))
+                               :test #'equal)
+                    (list spec)))
       spec)))
 
-;;; Internal Tool Normalization
-
-(defun copilot-ide--normalize-tool-spec (tool-spec)
-  "Normalize TOOL-SPEC to a consistent plist."
-  tool-spec)
-
 ;;; Public Functions
+
+(defun copilot-ide-mcp-server-new-session-id ()
+  "Return a new random session token (32 hex digits)."
+  (let ((bytes (ignore-errors
+                 (with-temp-buffer
+                   (set-buffer-multibyte nil)
+                   (insert-file-contents-literally "/dev/urandom" nil 0 16)
+                   (buffer-string)))))
+    (if (= (length bytes) 16)
+        (mapconcat (lambda (b) (format "%02x" b)) bytes "")
+      (substring (secure-hash 'sha256 (format "%S%S%S%S" (random t) (current-time)
+                                              (emacs-pid) (recent-keys)))
+                 0 32))))
 
 (defun copilot-ide-mcp-server-ensure-server ()
   "Ensure the MCP tools server is running.
 Returns the port number on success, nil if disabled or failed."
   (when copilot-ide-enable-mcp-server
-    (unless (and copilot-ide-mcp-server--server
-                 copilot-ide-mcp-server--port
-                 (copilot-ide-mcp-server--server-alive-p))
+    (unless (copilot-ide-mcp-server-get-port)
       (copilot-ide-mcp-server--start-server))
     copilot-ide-mcp-server--port))
 
 (defun copilot-ide-mcp-server-get-port ()
   "Get the port number of the running MCP tools server, or nil."
-  (when (and copilot-ide-mcp-server--server
-             copilot-ide-mcp-server--port
-             (copilot-ide-mcp-server--server-alive-p))
+  (when (and copilot-ide-mcp-server--port
+             (process-live-p copilot-ide-mcp-server--server))
     copilot-ide-mcp-server--port))
 
-(defun copilot-ide-mcp-server-session-started (&optional session-id project-dir buffer)
-  "Notify the server that a Copilot session started.
-Increments the session counter and registers the session."
-  (cl-incf copilot-ide-mcp-server--session-count)
-  (copilot-ide-debug "MCP session started. Count: %d" copilot-ide-mcp-server--session-count)
-  (when (and session-id project-dir buffer)
-    (copilot-ide-mcp-server-register-session session-id project-dir buffer)))
+(defun copilot-ide-mcp-server-session-started (session-id project-dir buffer)
+  "Register the session SESSION-ID for PROJECT-DIR shown in BUFFER."
+  (puthash session-id
+           (list :project-dir project-dir
+                 :buffer buffer
+                 :last-active-buffer nil)
+           copilot-ide-mcp-server--sessions)
+  (copilot-ide-debug "Registered MCP session for project %s" project-dir))
 
-(defun copilot-ide-mcp-server-session-ended (&optional session-id)
-  "Notify the server that a Copilot session ended.
-Decrements the session counter and stops the server when no sessions remain."
-  (when session-id
-    (copilot-ide-mcp-server-unregister-session session-id))
-  (when (> copilot-ide-mcp-server--session-count 0)
-    (cl-decf copilot-ide-mcp-server--session-count)
-    (copilot-ide-debug "MCP session ended. Count: %d" copilot-ide-mcp-server--session-count)
-    (when (= copilot-ide-mcp-server--session-count 0)
-      (copilot-ide-mcp-server--stop-server))))
+(defun copilot-ide-mcp-server-session-ended (session-id)
+  "Unregister SESSION-ID; stop the server when no session remains."
+  (remhash session-id copilot-ide-mcp-server--sessions)
+  (when (zerop (hash-table-count copilot-ide-mcp-server--sessions))
+    (copilot-ide-mcp-server--stop-server)))
 
-(defun copilot-ide-mcp-server-get-config (&optional session-id)
-  "Return the MCP `--mcp-config' JSON structure for passing to Copilot.
-SESSION-ID is embedded in the URL path so each session has its own context."
+(defun copilot-ide-mcp-server-get-config (session-id)
+  "Return the MCP client configuration for SESSION-ID, or nil.
+The result is an alist that encodes to the JSON object both Copilot
+and Claude accept: {\"mcpServers\": {\"emacs-tools\": {...}}}."
   (when-let* ((port (copilot-ide-mcp-server-get-port)))
-    (let* ((path (if session-id (format "/mcp/%s" session-id) "/mcp"))
-           (url (format "http://127.0.0.1:%d%s" port path))
-           (config `((type . "http") (url . ,url))))
-      `((mcpServers . ((emacs-tools . ,config)))))))
+    `((mcpServers
+       . ((emacs-tools
+           . ((type . "http")
+              (url . ,(format "http://127.0.0.1:%d/mcp/%s" port session-id)))))))))
 
 (defun copilot-ide-mcp-server-get-tool-names (&optional prefix)
   "Return a list of registered tool names, each optionally prefixed with PREFIX."
@@ -178,23 +183,7 @@ SESSION-ID is embedded in the URL path so each session has its own context."
               (if prefix (concat prefix name) name)))
           copilot-ide-mcp-server-tools))
 
-;;; Session Management
-
-(defun copilot-ide-mcp-server-register-session (session-id project-dir buffer)
-  "Register a session with SESSION-ID, PROJECT-DIR, and BUFFER."
-  (puthash session-id
-           (list :project-dir project-dir
-                 :buffer buffer
-                 :last-active-buffer nil
-                 :start-time (current-time))
-           copilot-ide-mcp-server--sessions)
-  (copilot-ide-debug "Registered MCP session %s for project %s" session-id project-dir))
-
-(defun copilot-ide-mcp-server-unregister-session (session-id)
-  "Remove the session registered under SESSION-ID."
-  (when (gethash session-id copilot-ide-mcp-server--sessions)
-    (remhash session-id copilot-ide-mcp-server--sessions)
-    (copilot-ide-debug "Unregistered MCP session %s" session-id)))
+;;; Session Context
 
 (defun copilot-ide-mcp-server-get-session-context (&optional session-id)
   "Return the context plist for SESSION-ID (or the current session)."
@@ -204,53 +193,47 @@ SESSION-ID is embedded in the URL path so each session has its own context."
 (defun copilot-ide-mcp-server-update-last-active-buffer (session-id buffer)
   "Set the last active BUFFER for SESSION-ID."
   (when-let* ((session (gethash session-id copilot-ide-mcp-server--sessions)))
-    (plist-put session :last-active-buffer buffer)
-    (copilot-ide-debug "Updated last active buffer for session %s to %s"
-                       session-id (buffer-name buffer))))
+    (unless (eq (plist-get session :last-active-buffer) buffer)
+      (puthash session-id (plist-put session :last-active-buffer buffer)
+               copilot-ide-mcp-server--sessions))))
+
+(defun copilot-ide-mcp-server-expand-file-name (file)
+  "Expand FILE relative to the project directory of the current session.
+Outside a session, FILE is expanded relative to `default-directory'."
+  (expand-file-name
+   file (or (plist-get (copilot-ide-mcp-server-get-session-context) :project-dir)
+            default-directory)))
 
 (defmacro copilot-ide-mcp-server-with-session-context (session-id &rest body)
-  "Execute BODY in the context of SESSION-ID.
-Sets `default-directory' to the session project root and makes the
-last active buffer (falling back to the registered buffer) current."
+  "Execute BODY in the context of SESSION-ID (nil means the current session).
+Makes the last active buffer (falling back to the session buffer)
+current and binds `default-directory' to the project root."
   (declare (indent 1))
-  `(let* ((context (copilot-ide-mcp-server-get-session-context ,session-id))
-          (project-dir (plist-get context :project-dir))
-          (last-active-buffer (plist-get context :last-active-buffer))
-          (registered-buffer (plist-get context :buffer))
-          (buffer (or (and last-active-buffer
-                           (buffer-live-p last-active-buffer)
-                           last-active-buffer)
-                      (and registered-buffer
-                           (buffer-live-p registered-buffer)
-                           registered-buffer))))
-     (if (not context)
-         (error "No session context found for session %s" ,session-id)
-       (let ((default-directory (or project-dir default-directory)))
-         (if buffer
-             (with-current-buffer buffer ,@body)
+  (let ((context (make-symbol "context"))
+        (buffer (make-symbol "buffer")))
+    `(let* ((,context (copilot-ide-mcp-server-get-session-context ,session-id))
+            (,buffer (cl-find-if #'buffer-live-p
+                                 (list (plist-get ,context :last-active-buffer)
+                                       (plist-get ,context :buffer)))))
+       (unless ,context
+         (error "No session context found"))
+       (with-current-buffer (or ,buffer (current-buffer))
+         ;; `default-directory' is buffer-local everywhere, so bind it
+         ;; after switching buffers.
+         (let ((default-directory (or (plist-get ,context :project-dir)
+                                      default-directory)))
            ,@body)))))
 
 ;;; Internal Functions
 
-(defun copilot-ide-mcp-server--server-alive-p ()
-  "Return non-nil if the HTTP server process is live."
-  (when copilot-ide-mcp-server--server
-    (condition-case nil
-        (let ((process (ws-process copilot-ide-mcp-server--server)))
-          (and process (process-live-p process)))
-      (error nil))))
-
 (defun copilot-ide-mcp-server--start-server ()
-  "Start the MCP HTTP server."
+  "Start the MCP HTTP server; return its port or nil on failure."
   (condition-case err
       (progn
         (require 'copilot-ide-mcp-http-server)
-        (unless (featurep 'web-server)
-          (error "The web-server package is required.  Install it with: M-x package-install RET web-server RET"))
         (let ((result (copilot-ide-mcp-http-server-start copilot-ide-mcp-server-port)))
           (setq copilot-ide-mcp-server--server (car result)
-                copilot-ide-mcp-server--port (cdr result))
-          copilot-ide-mcp-server--port))
+                copilot-ide-mcp-server--port (cdr result))))
     (error
      (copilot-ide-debug "Failed to start MCP server: %s" (error-message-string err))
      (message "Warning: Failed to start MCP server: %s" (error-message-string err))
@@ -259,15 +242,10 @@ last active buffer (falling back to the registered buffer) current."
 (defun copilot-ide-mcp-server--stop-server ()
   "Stop the MCP HTTP server."
   (when copilot-ide-mcp-server--server
-    (condition-case err
-        (progn
-          (copilot-ide-mcp-http-server-stop copilot-ide-mcp-server--server)
-          (setq copilot-ide-mcp-server--server nil
-                copilot-ide-mcp-server--port nil)
-          (clrhash copilot-ide-mcp-server--sessions)
-          (copilot-ide-debug "MCP server stopped"))
-      (error
-       (copilot-ide-debug "Error stopping MCP server: %s" (error-message-string err))))))
+    (copilot-ide-mcp-http-server-stop copilot-ide-mcp-server--server)
+    (setq copilot-ide-mcp-server--server nil
+          copilot-ide-mcp-server--port nil)
+    (copilot-ide-debug "MCP server stopped")))
 
 (provide 'copilot-ide-mcp-server)
 

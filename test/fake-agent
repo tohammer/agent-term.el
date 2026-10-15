@@ -1,0 +1,11 @@
+#!/bin/sh
+# Stand-in for an agent CLI in the tests: logs its arguments and
+# environment, exits on --exit-now, otherwise logs its input.
+log="${FAKE_AGENT_LOG:-/dev/null}"
+for arg in "$@"; do
+  printf 'ARG:%s\n' "$arg" >> "$log"
+  [ "$arg" = "--exit-now" ] && exit 0
+done
+printf 'ENV:FAKE_VAR=%s\n' "$FAKE_VAR" >> "$log"
+printf 'READY\n' >> "$log"
+exec cat >> "$log"

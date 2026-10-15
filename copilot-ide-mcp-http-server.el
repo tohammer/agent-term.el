@@ -1,8 +1,8 @@
 ;;; copilot-ide-mcp-http-server.el --- HTTP transport for MCP tools  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025
+;; Copyright (C) 2025 Tobias Hammer
 
-;; Keywords: ai, copilot, mcp, http
+;; Keywords: ai, mcp, http
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is not part of GNU Emacs.
@@ -22,183 +22,270 @@
 
 ;;; Commentary:
 
-;; HTTP server implementing MCP Streamable HTTP transport for copilot-ide.el.
-;; Session IDs are passed via URL paths (e.g. /mcp/SESSION-ID) so multiple
-;; concurrent Copilot sessions each get their own Emacs context.
+;; A minimal HTTP/1.1 server implementing the MCP Streamable HTTP
+;; transport (JSON responses only, no SSE stream).
+;;
+;; Every session gets its own endpoint /mcp/TOKEN, where TOKEN is a
+;; random secret that only the agent started by this package knows.
+;; Requests for any other path are rejected, so other local processes
+;; and web pages cannot call the tools.  Requests that carry a
+;; non-local Origin header are rejected as well (DNS rebinding).
+;;
+;; The server reads the whole body (Content-Length) before it handles
+;; a request; each connection carries exactly one request.
 
 ;;; Code:
 
-(require 'json)
 (require 'cl-lib)
+(require 'json)
+(require 'subr-x)
 (require 'copilot-ide-debug)
 (require 'copilot-ide-mcp-server)
 
-(defvar copilot-ide-mcp-server--current-session-id)
+(define-error 'copilot-ide-mcp-error "MCP error")
 
-(unless (featurep 'web-server)
-  (condition-case err
-      (require 'web-server)
-    (error
-     (copilot-ide-debug "Failed to load web-server package: %s" (error-message-string err)))))
+(defconst copilot-ide-mcp-http-server--protocol-versions
+  '("2025-06-18" "2025-03-26" "2024-11-05")
+  "MCP protocol versions this server accepts, newest first.")
 
-(declare-function ws-process "web-server" (server))
-(declare-function ws-start "web-server" (handlers port &optional log-buffer &rest network-args))
-(declare-function ws-stop "web-server" (server))
-(declare-function ws-send-404 "web-server" (proc &optional info))
-(declare-function ws-headers "web-server" (request))
-(declare-function ws-body "web-server" (request))
-(declare-function ws-send "web-server" (proc msg))
-(declare-function ws-response-header "web-server" (proc code &rest headers))
+(defconst copilot-ide-mcp-http-server--max-request-size (* 16 1024 1024)
+  "Largest request (headers and body, in bytes) the server accepts.")
 
 ;;; Public Functions
 
 (defun copilot-ide-mcp-http-server-start (&optional port)
-  "Start the MCP HTTP server, optionally on PORT (0 = auto).
-Returns a cons cell (server . actual-port)."
-  (unless (featurep 'web-server)
-    (error "web-server package is not available"))
-  (copilot-ide-debug "Starting MCP HTTP server on port %s" (or port "auto"))
-  (condition-case err
-      (let* ((selected-port (or port 0))
-             (server (ws-start
-                      `(((:GET . "^/mcp\\(/.*\\)?$") . ,#'copilot-ide-mcp-http-server--handle-get)
-                        ((:POST . "^/mcp\\(/.*\\)?$") . ,#'copilot-ide-mcp-http-server--handle-post))
-                      selected-port
-                      nil
-                      :host "127.0.0.1")))
-        (let* ((process (ws-process server))
-               (actual-port (process-contact process :service)))
-          (copilot-ide-debug "MCP HTTP server started on port %d" actual-port)
-          (set-process-sentinel process
-                                (lambda (_proc event)
-                                  (when (string-match-p "\\(exited\\|killed\\|terminated\\)" event)
-                                    (copilot-ide-debug "MCP HTTP server died unexpectedly"))))
-          (cons server actual-port)))
-    (error
-     (copilot-ide-debug "Failed to start HTTP server: %s" (error-message-string err))
-     (signal 'error (list (format "Failed to start MCP HTTP server: %s"
-                                  (error-message-string err)))))))
+  "Start the MCP HTTP server on 127.0.0.1, on PORT or a free port.
+Return a cons cell (SERVER-PROCESS . ACTUAL-PORT)."
+  (let* ((server (make-network-process
+                  :name "copilot-ide-mcp"
+                  :server t
+                  :host "127.0.0.1"
+                  :family 'ipv4
+                  :service (or port 0)
+                  :coding 'binary
+                  :noquery t
+                  :filter #'copilot-ide-mcp-http-server--filter))
+         (actual-port (process-contact server :service)))
+    (copilot-ide-debug "MCP HTTP server started on port %d" actual-port)
+    (cons server actual-port)))
 
 (defun copilot-ide-mcp-http-server-stop (server)
-  "Stop the MCP HTTP SERVER."
-  (when server (ws-stop server)))
+  "Stop the MCP HTTP SERVER process."
+  (when (processp server)
+    (delete-process server)))
 
-;;; Request Handlers
+;;; Connection Handling
 
-(defun copilot-ide-mcp-http-server--extract-session-id (headers)
-  "Extract session ID from the URL path in HEADERS.
-Matches the /mcp/SESSION-ID pattern."
-  (let ((url (or (cdr (assoc :POST headers))
-                 (cdr (assoc :GET headers)))))
-    (when (and url (string-match "^/mcp/\\([^/?]+\\)" url))
-      (match-string 1 url))))
+(defun copilot-ide-mcp-http-server--filter (proc string)
+  "Collect STRING from connection PROC and handle a complete request."
+  (let ((pending (concat (or (process-get proc 'pending) "") string)))
+    (process-put proc 'pending pending)
+    (cond
+     ((> (length pending) copilot-ide-mcp-http-server--max-request-size)
+      (copilot-ide-mcp-http-server--respond proc 413 "text/plain" "Too large"))
+     ((process-get proc 'handled) nil)
+     (t
+      (when-let* ((request (copilot-ide-mcp-http-server--parse pending)))
+        (process-put proc 'handled t)
+        (copilot-ide-mcp-http-server--handle proc request))))))
 
-(defun copilot-ide-mcp-http-server--handle-get (request)
-  "Handle GET requests (not used; return 404)."
-  (with-slots (process) request
-    (ws-send-404 process)))
+(defun copilot-ide-mcp-http-server--parse (data)
+  "Parse the HTTP request in unibyte DATA.
+Return a plist (:method :path :headers :body), or nil while the
+request is still incomplete.  Header names are downcased."
+  (when-let* ((end (string-search "\r\n\r\n" data)))
+    (let* ((lines (split-string (substring data 0 end) "\r\n"))
+           (request-line (split-string (car lines) " "))
+           (headers (delq nil
+                          (mapcar (lambda (line)
+                                    (when (string-match "\\`\\([^:]+\\):[ \t]*\\(.*\\)\\'" line)
+                                      (cons (downcase (match-string 1 line))
+                                            (string-trim (match-string 2 line)))))
+                                  (cdr lines))))
+           (length (string-to-number
+                    (or (cdr (assoc "content-length" headers)) "0")))
+           (body-start (+ end 4)))
+      (when (>= (length data) (+ body-start length))
+        (list :method (car request-line)
+              :path (or (cadr request-line) "")
+              :headers headers
+              :body (substring data body-start (+ body-start length)))))))
 
-(defun copilot-ide-mcp-http-server--handle-post (request)
-  "Handle POST requests to /mcp/* endpoints."
-  (copilot-ide-debug "MCP HTTP server received POST")
-  (condition-case err
-      (let* ((headers (ws-headers request))
-             (body (ws-body request))
-             (session-id (copilot-ide-mcp-http-server--extract-session-id headers))
-             (json-object (json-parse-string body :object-type 'alist))
-             (method (alist-get 'method json-object))
-             (params (alist-get 'params json-object))
-             (id (alist-get 'id json-object)))
-        (copilot-ide-debug "MCP request - method: %s, id: %s, session: %s" method id session-id)
-        (if (null id)
-            ;; Notification: no response needed
-            (copilot-ide-mcp-http-server--send-empty-response request)
-          (let* ((copilot-ide-mcp-server--current-session-id session-id)
-                 (result (copilot-ide-mcp-http-server--dispatch method params)))
-            (copilot-ide-mcp-http-server--send-json-response
-             request 200
-             `((jsonrpc . "2.0") (id . ,id) (result . ,result))))))
-    (json-parse-error
-     (copilot-ide-mcp-http-server--send-json-error request nil -32700 "Parse error"))
-    (quit
-     (copilot-ide-mcp-http-server--send-json-error request nil -32001 "Operation cancelled by user"))
-    (error
-     (copilot-ide-debug "Error handling request: %s" (error-message-string err))
-     (copilot-ide-mcp-http-server--send-json-error
-      request nil -32603 (format "Internal error: %s" (error-message-string err))))))
+(defun copilot-ide-mcp-http-server--respond (proc status content-type body
+                                                 &optional extra-headers)
+  "Send an HTTP response with STATUS, CONTENT-TYPE and BODY on PROC.
+EXTRA-HEADERS is an alist of additional header names and values.
+The connection is closed afterwards."
+  (let ((payload (encode-coding-string (or body "") 'utf-8)))
+    (when (process-live-p proc)
+      (process-send-string
+       proc
+       (concat (format "HTTP/1.1 %d %s\r\n" status
+                       (pcase status
+                         (200 "OK") (202 "Accepted") (400 "Bad Request")
+                         (403 "Forbidden") (404 "Not Found")
+                         (405 "Method Not Allowed") (413 "Payload Too Large")
+                         (_ "Error")))
+               (if content-type (format "Content-Type: %s\r\n" content-type) "")
+               (mapconcat (lambda (h) (format "%s: %s\r\n" (car h) (cdr h)))
+                          extra-headers "")
+               (format "Content-Length: %d\r\n" (length payload))
+               "Connection: close\r\n\r\n"
+               payload))
+      (delete-process proc))))
+
+(defun copilot-ide-mcp-http-server--local-origin-p (origin)
+  "Return non-nil if ORIGIN is absent or names the local host."
+  (or (null origin)
+      (string-match-p
+       "\\`https?://\\(localhost\\|127\\.0\\.0\\.1\\|\\[::1\\]\\)\\(:[0-9]+\\)?\\'"
+       origin)))
+
+(defun copilot-ide-mcp-http-server--session-id (path)
+  "Return the session token from PATH (/mcp/TOKEN), or nil."
+  (when (string-match "\\`/mcp/\\([^/?#]+\\)\\(?:[?#].*\\)?\\'" path)
+    (match-string 1 path)))
+
+(defun copilot-ide-mcp-http-server--handle (proc request)
+  "Answer REQUEST, a plist from `copilot-ide-mcp-http-server--parse', on PROC."
+  (let* ((headers (plist-get request :headers))
+         (session-id (copilot-ide-mcp-http-server--session-id
+                      (plist-get request :path))))
+    (cond
+     ((not (copilot-ide-mcp-http-server--local-origin-p
+            (cdr (assoc "origin" headers))))
+      (copilot-ide-mcp-http-server--respond proc 403 "text/plain" "Forbidden"))
+     ((not (and session-id (copilot-ide-mcp-server-get-session-context session-id)))
+      (copilot-ide-debug "MCP request for unknown path %s" (plist-get request :path))
+      (copilot-ide-mcp-http-server--respond proc 404 "text/plain" "Not Found"))
+     ((not (equal (plist-get request :method) "POST"))
+      (copilot-ide-mcp-http-server--respond proc 405 "text/plain" "Method Not Allowed"
+                                            '(("Allow" . "POST"))))
+     (t
+      (copilot-ide-mcp-http-server--handle-post
+       proc session-id (decode-coding-string (plist-get request :body) 'utf-8))))))
+
+(defun copilot-ide-mcp-http-server--handle-post (proc session-id body)
+  "Handle the JSON-RPC message BODY for SESSION-ID and answer on PROC."
+  (let ((message (condition-case nil
+                     (json-parse-string body :object-type 'alist
+                                        :null-object nil :false-object :false)
+                   (error 'invalid))))
+    (cond
+     ((eq message 'invalid)
+      (copilot-ide-mcp-http-server--send-json
+       proc (copilot-ide-mcp-http-server--error-message nil -32700 "Parse error")))
+     ((or (not (consp message)) (not (alist-get 'method message)))
+      ;; A JSON-RPC response or notification batch: nothing to answer.
+      (copilot-ide-mcp-http-server--respond proc 202 nil nil))
+     ((not (assq 'id message))
+      ;; Notification (e.g. notifications/initialized).
+      (copilot-ide-mcp-http-server--respond proc 202 nil nil))
+     (t
+      (copilot-ide-mcp-http-server--send-json
+       proc (copilot-ide-mcp-http-server--process-request session-id message))))))
+
+(defun copilot-ide-mcp-http-server--process-request (session-id message)
+  "Return the JSON-RPC response alist for request MESSAGE of SESSION-ID."
+  (let ((id (alist-get 'id message))
+        (method (alist-get 'method message))
+        (params (alist-get 'params message)))
+    (copilot-ide-debug "MCP request - method: %s, id: %s, session: %s"
+                       method id session-id)
+    (condition-case err
+        (let ((copilot-ide-mcp-server--current-session-id session-id))
+          `((jsonrpc . "2.0") (id . ,id)
+            (result . ,(copilot-ide-mcp-http-server--dispatch method params))))
+      (copilot-ide-mcp-error
+       (copilot-ide-mcp-http-server--error-message id (nth 1 err) (nth 2 err)))
+      (error
+       (copilot-ide-debug "Error handling request: %s" (error-message-string err))
+       (copilot-ide-mcp-http-server--error-message
+        id -32603 (format "Internal error: %s" (error-message-string err)))))))
+
+(defun copilot-ide-mcp-http-server--error-message (id code message)
+  "Return a JSON-RPC error response alist for request ID with CODE and MESSAGE."
+  `((jsonrpc . "2.0") (id . ,id) (error . ((code . ,code) (message . ,message)))))
+
+(defun copilot-ide-mcp-http-server--send-json (proc object)
+  "Send OBJECT as a JSON 200 response on PROC."
+  (copilot-ide-mcp-http-server--respond proc 200 "application/json"
+                                        (json-encode object)))
 
 ;;; MCP Protocol Dispatch
 
 (defun copilot-ide-mcp-http-server--dispatch (method params)
-  "Dispatch MCP METHOD with PARAMS."
+  "Dispatch MCP METHOD with PARAMS and return the result."
   (pcase method
     ("initialize" (copilot-ide-mcp-http-server--handle-initialize params))
-    ("tools/list" (copilot-ide-mcp-http-server--handle-tools-list params))
+    ("ping" (make-hash-table))
+    ("tools/list" (copilot-ide-mcp-http-server--handle-tools-list))
     ("tools/call" (copilot-ide-mcp-http-server--handle-tools-call params))
-    (_ (signal 'json-rpc-error (list -32601 "Method not found")))))
+    (_ (signal 'copilot-ide-mcp-error
+               (list -32601 (format "Method not found: %s" method))))))
 
-(defun copilot-ide-mcp-http-server--handle-initialize (_params)
-  "Handle the MCP initialize request."
-  `((protocolVersion . "2024-11-05")
-    (capabilities . ((tools . ((listChanged . :json-false)))
-                     (logging . ,(make-hash-table :test 'equal))))
-    (serverInfo . ((name . "copilot-ide-mcp-tools") (version . "0.1.0")))))
+(defun copilot-ide-mcp-http-server--handle-initialize (params)
+  "Handle the MCP initialize request with PARAMS."
+  (let ((requested (alist-get 'protocolVersion params)))
+    `((protocolVersion . ,(if (member requested copilot-ide-mcp-http-server--protocol-versions)
+                              requested
+                            (car copilot-ide-mcp-http-server--protocol-versions)))
+      (capabilities . ((tools . ((listChanged . :json-false)))))
+      (serverInfo . ((name . "emacs-tools") (version . "0.1.0"))))))
 
-(defun copilot-ide-mcp-http-server--handle-tools-list (_params)
+(defun copilot-ide-mcp-http-server--handle-tools-list ()
   "Handle tools/list: return all registered tools."
   (let ((tools (mapcar #'copilot-ide-mcp-http-server--tool-to-mcp
                        copilot-ide-mcp-server-tools)))
     (copilot-ide-debug "MCP server returning %d tools" (length tools))
-    `((tools . ,tools))))
+    `((tools . ,(vconcat tools)))))
 
 (defun copilot-ide-mcp-http-server--handle-tools-call (params)
-  "Handle tools/call with PARAMS."
+  "Handle tools/call with PARAMS.
+Errors raised by the tool are returned as a result with isError set,
+as the MCP specification requires."
   (let* ((tool-name (alist-get 'name params))
-         (tool-args (alist-get 'arguments params))
-         (tool-spec (cl-find-if
-                     (lambda (spec)
-                       (string= (plist-get spec :name) tool-name))
-                     copilot-ide-mcp-server-tools)))
+         (tool-spec (cl-find tool-name copilot-ide-mcp-server-tools
+                             :key (lambda (spec) (plist-get spec :name))
+                             :test #'equal)))
     (unless tool-spec
-      (signal 'json-rpc-error (list -32602 (format "Unknown tool: %s" tool-name))))
-    (let* ((tool-function (plist-get tool-spec :function))
-           (arg-specs (plist-get tool-spec :args))
-           (args (copilot-ide-mcp-http-server--validate-args tool-args arg-specs)))
+      (signal 'copilot-ide-mcp-error
+              (list -32602 (format "Unknown tool: %s" tool-name))))
+    (let ((args (copilot-ide-mcp-http-server--validate-args
+                 (alist-get 'arguments params) (plist-get tool-spec :args))))
       (condition-case err
-          (let ((result (apply tool-function args)))
-            `((content . (((type . "text")
-                           (text . ,(copilot-ide-mcp-http-server--format-result result)))))))
+          `((content . [((type . "text")
+                         (text . ,(copilot-ide-mcp-http-server--format-result
+                                   (apply (plist-get tool-spec :function) args))))]))
         (quit
-         `((content . (((type . "text") (text . "Operation cancelled by user"))))))
+         '((content . [((type . "text") (text . "Operation cancelled by user"))])
+           (isError . t)))
         (error
-         `((content . (((type . "text")
-                        (text . ,(format "Error: %s" (error-message-string err))))))))))))
+         `((content . [((type . "text")
+                        (text . ,(format "Error: %s" (error-message-string err))))])
+           (isError . t)))))))
 
 ;;; Helper Functions
 
 (defun copilot-ide-mcp-http-server--tool-to-mcp (spec)
   "Convert tool SPEC to MCP wire format."
-  (let ((name (plist-get spec :name))
-        (description (plist-get spec :description))
-        (args (plist-get spec :args)))
-    `((name . ,name)
-      (description . ,description)
+  (let ((args (plist-get spec :args)))
+    `((name . ,(plist-get spec :name))
+      (description . ,(plist-get spec :description))
       (inputSchema . ((type . "object")
                       (properties . ,(copilot-ide-mcp-http-server--args-to-schema args))
                       (required . ,(copilot-ide-mcp-http-server--required-args args)))))))
 
 (defun copilot-ide-mcp-http-server--args-to-schema (args)
-  "Convert ARGS list to a JSON Schema properties alist."
-  (if args
-      (let ((schema '()))
-        (dolist (arg args (nreverse schema))
-          (let* ((name (plist-get arg :name))
-                 (type (plist-get arg :type))
-                 (desc (plist-get arg :description))
-                 (prop `((type . ,(if (symbolp type) (symbol-name type) type)))))
-            (when desc (setq prop (append prop `((description . ,desc)))))
-            (push (cons (intern name) prop) schema))))
-    (make-hash-table :test 'equal)))
+  "Convert ARGS list to a JSON Schema properties object."
+  (let ((schema (make-hash-table :test 'equal)))
+    (dolist (arg args schema)
+      (let ((type (plist-get arg :type))
+            (desc (plist-get arg :description)))
+        (puthash (plist-get arg :name)
+                 `((type . ,(if (symbolp type) (symbol-name type) type))
+                   ,@(when desc `((description . ,desc))))
+                 schema)))))
 
 (defun copilot-ide-mcp-http-server--required-args (args)
   "Return a vector of required argument names from ARGS."
@@ -208,46 +295,25 @@ Matches the /mcp/SESSION-ID pattern."
                              args))))
 
 (defun copilot-ide-mcp-http-server--validate-args (args arg-specs)
-  "Validate ARGS against ARG-SPECS; return ordered argument list."
-  (let ((result '()))
-    (dolist (spec arg-specs (nreverse result))
-      (let* ((name (plist-get spec :name))
-             (optional (plist-get spec :optional))
-             (value (alist-get (intern name) args)))
-        (when (and (not optional) (not value))
-          (signal 'json-rpc-error (list -32602 (format "Missing required argument: %s" name))))
-        (push value result)))))
+  "Return the values in ARGS ordered as in ARG-SPECS.
+JSON false (`:false') and null are passed on as nil.  Signal an MCP
+error when a required argument is missing or null."
+  (mapcar (lambda (spec)
+            (let* ((name (plist-get spec :name))
+                   (value (alist-get (intern name) args)))
+              (when (and (not (plist-get spec :optional)) (null value))
+                (signal 'copilot-ide-mcp-error
+                        (list -32602 (format "Missing required argument: %s" name))))
+              (unless (eq value :false) value)))
+          arg-specs))
 
 (defun copilot-ide-mcp-http-server--format-result (result)
   "Format RESULT as a string for the MCP response."
   (cond
    ((stringp result) result)
-   ((listp result)
+   ((and result (listp result))
     (mapconcat (lambda (item) (format "%s" item)) result "\n"))
    (t (format "%s" result))))
-
-(defun copilot-ide-mcp-http-server--send-json-response (request status body)
-  "Send a JSON response with STATUS and BODY to REQUEST."
-  (with-slots (process) request
-    (apply #'ws-response-header process status
-           '(("Content-Type" . "application/json")
-             ("Access-Control-Allow-Origin" . "*")))
-    (ws-send process (json-encode body))
-    (throw 'close-connection nil)))
-
-(defun copilot-ide-mcp-http-server--send-empty-response (request)
-  "Send an empty HTTP 200 response (for notifications)."
-  (with-slots (process) request
-    (ws-response-header process 200
-                        (cons "Content-Type" "text/plain")
-                        (cons "Content-Length" "0"))
-    (throw 'close-connection nil)))
-
-(defun copilot-ide-mcp-http-server--send-json-error (request id code message)
-  "Send a JSON-RPC error response."
-  (copilot-ide-mcp-http-server--send-json-response
-   request 200
-   `((jsonrpc . "2.0") (id . ,id) (error . ((code . ,code) (message . ,message))))))
 
 (provide 'copilot-ide-mcp-http-server)
 

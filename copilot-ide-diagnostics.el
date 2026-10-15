@@ -28,7 +28,7 @@
 
 ;; Flycheck and Flymake diagnostic collection for copilot-ide.el.
 ;;
-;; Exposes a `get_diagnostics' MCP tool that Copilot can call to retrieve
+;; Exposes a `get_diagnostics' MCP tool that the agent can call to retrieve
 ;; current errors and warnings from open buffers.  Supports both Flycheck
 ;; and Flymake, with automatic backend detection.
 ;;
@@ -39,6 +39,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'subr-x)
 (require 'copilot-ide-debug)
 (require 'copilot-ide-mcp-server)
 
@@ -158,15 +159,16 @@
   "Return diagnostics from Flycheck/Flymake for FILE-PATH (or all project files).
 When FILE-PATH is nil or empty, all open buffers that belong to the current
 MCP session's project are checked.
-Returns a formatted string suitable for Copilot's context window."
+Returns a formatted string suitable for the agent's context window."
   (copilot-ide-mcp-server-with-session-context nil
     (let* ((context (copilot-ide-mcp-server-get-session-context))
            (project-dir (plist-get context :project-dir))
            (results '()))
       (if (and file-path (not (string-empty-p file-path)))
           ;; Single file
-          (let ((buffer (or (find-buffer-visiting file-path)
-                            (find-file-noselect file-path))))
+          (let* ((file (copilot-ide-mcp-server-expand-file-name file-path))
+                 (buffer (or (find-buffer-visiting file)
+                             (find-file-noselect file))))
             (when buffer
               (let ((diags (copilot-ide-diagnostics--collect buffer)))
                 (if diags
@@ -196,7 +198,7 @@ Returns a formatted string suitable for Copilot's context window."
 This is called automatically by `copilot-ide-emacs-tools-setup'."
   (copilot-ide-make-tool
    :function #'copilot-ide-get-diagnostics
-   :name "copilot_cli_get_diagnostics"
+   :name "get_diagnostics"
    :description (concat "Get current errors and warnings from Flycheck or Flymake "
                          "for a specific file or all open project files. "
                          "Returns severity, line/column, message, and checker source.")

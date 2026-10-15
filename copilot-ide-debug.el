@@ -1,4 +1,4 @@
-;;; copilot-ide-debug.el --- Debug logging for Copilot CLI  -*- lexical-binding: t; -*-
+;;; copilot-ide-debug.el --- Debug logging for copilot-ide  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025 Tobias Hammer
 ;; Copyright (C) 2025 Yoav Orot
@@ -6,7 +6,7 @@
 ;; Based on claude-code-ide.el by Yoav Orot (manzaltu)
 ;; https://github.com/manzaltu/claude-code-ide.el
 
-;; Keywords: ai, copilot, mcp, debug
+;; Keywords: ai, mcp, debug
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is not part of GNU Emacs.
@@ -35,7 +35,7 @@
 ;;; Customization
 
 (defcustom copilot-ide-debug nil
-  "When non-nil, enable debug logging for Copilot CLI."
+  "When non-nil, enable debug logging."
   :type 'boolean
   :group 'copilot-ide)
 

@@ -1,4 +1,4 @@
-;;; copilot-ide-transient.el --- Transient menus for Copilot CLI  -*- lexical-binding: t; -*-
+;;; copilot-ide-transient.el --- Transient menus for copilot-ide  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025 Tobias Hammer
 ;; Copyright (C) 2025 Yoav Orot
@@ -6,7 +6,7 @@
 ;; Based on claude-code-ide.el by Yoav Orot (manzaltu)
 ;; https://github.com/manzaltu/claude-code-ide.el
 
-;; Keywords: ai, copilot, transient, menu
+;; Keywords: ai, transient, menu
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is not part of GNU Emacs.
@@ -36,19 +36,24 @@
 (declare-function copilot-ide "copilot-ide" ())
 (declare-function copilot-ide-continue "copilot-ide" ())
 (declare-function copilot-ide-resume "copilot-ide" (&optional session-id))
+(declare-function copilot-ide-start-agent "copilot-ide" (agent))
 (declare-function copilot-ide-stop "copilot-ide" ())
 (declare-function copilot-ide-list-sessions "copilot-ide" ())
 (declare-function copilot-ide-switch-to-buffer "copilot-ide" ())
-(declare-function copilot-ide-send-prompt "copilot-ide" ())
+(declare-function copilot-ide-send-prompt "copilot-ide" (&optional prompt))
 (declare-function copilot-ide-send-escape "copilot-ide" ())
 (declare-function copilot-ide-insert-newline "copilot-ide" ())
 (declare-function copilot-ide-toggle "copilot-ide" ())
 (declare-function copilot-ide-toggle-recent "copilot-ide" ())
 (declare-function copilot-ide-check-status "copilot-ide" ())
-(declare-function copilot-ide--ensure-cli "copilot-ide" ())
-(declare-function copilot-ide--get-working-directory "copilot-ide" ())
-(declare-function copilot-ide--get-process "copilot-ide" ())
+(declare-function copilot-ide--current-session "copilot-ide" ())
+(declare-function copilot-ide--session-label "copilot-ide" (session))
+(declare-function copilot-ide--agent-name "copilot-ide" (&optional agent))
+(declare-function copilot-ide--program "copilot-ide" (&optional agent))
+(declare-function copilot-ide--cli-available-p "copilot-ide" (&optional agent))
 
+(defvar copilot-ide-agent)
+(defvar copilot-ide-agents)
 (defvar copilot-ide-cli-path)
 (defvar copilot-ide-debug)
 (defvar copilot-ide-window-side)
@@ -60,92 +65,67 @@
 
 ;;; Helper Functions
 
-(defun copilot-ide--has-active-session-p ()
-  "Return non-nil if there is an active Copilot session for the current project."
-  (when (copilot-ide--get-process) t))
-
-(defun copilot-ide--start-description ()
-  "Dynamic description for start command."
-  (if (copilot-ide--has-active-session-p)
-      (propertize "Start new Copilot session (session already running)"
-                  'face 'transient-inactive-value)
-    "Start new Copilot session"))
-
-(defun copilot-ide--start-if-no-session ()
-  "Start Copilot only if no session is active for the current project."
-  (interactive)
-  (if (copilot-ide--has-active-session-p)
-      (message "[%s] Copilot session already running"
-               (file-name-nondirectory
-                (directory-file-name (copilot-ide--get-working-directory))))
-    (copilot-ide)))
-
-(defun copilot-ide--continue-description ()
-  "Dynamic description for continue command."
-  (if (copilot-ide--has-active-session-p)
-      (propertize "Continue most recent session (session already running)"
-                  'face 'transient-inactive-value)
-    "Continue most recent session"))
-
-(defun copilot-ide--continue-if-no-session ()
-  "Continue most recent Copilot session only if no session is active."
-  (interactive)
-  (if (copilot-ide--has-active-session-p)
-      (message "[%s] Copilot session already running"
-               (file-name-nondirectory
-                (directory-file-name (copilot-ide--get-working-directory))))
-    (copilot-ide-continue)))
-
-(defun copilot-ide--resume-description ()
-  "Dynamic description for resume command."
-  (if (copilot-ide--has-active-session-p)
-      (propertize "Resume previous session (session already running)"
-                  'face 'transient-inactive-value)
-    "Resume previous session"))
-
-(defun copilot-ide--resume-if-no-session ()
-  "Resume a previous Copilot session only if no session is active."
-  (interactive)
-  (if (copilot-ide--has-active-session-p)
-      (message "[%s] Copilot session already running"
-               (file-name-nondirectory
-                (directory-file-name (copilot-ide--get-working-directory))))
-    (copilot-ide-resume)))
-
 (defun copilot-ide--session-status ()
-  "Return a string describing the current session status."
-  (if (copilot-ide--has-active-session-p)
-      (propertize (format "Active session in [%s]"
-                          (file-name-nondirectory
-                           (directory-file-name (copilot-ide--get-working-directory))))
+  "Return a string describing the session of the current project."
+  (if-let* ((session (copilot-ide--current-session)))
+      (propertize (format "Active session: %s" (copilot-ide--session-label session))
                   'face 'success)
-    (propertize "No active session" 'face 'transient-inactive-value)))
+    (propertize (format "No active session (agent: %s)" (copilot-ide--agent-name))
+                'face 'transient-inactive-value)))
+
+(defun copilot-ide--describe-start (label)
+  "Return LABEL, dimmed when a session is already running."
+  (if (copilot-ide--current-session)
+      (propertize (concat label " (session already running)")
+                  'face 'transient-inactive-value)
+    label))
+
+(defmacro copilot-ide--define-start-command (name command)
+  "Define NAME, which runs COMMAND unless a session is running."
+  `(defun ,name ()
+     ,(format "Run `%s' unless the project already has a session." command)
+     (interactive)
+     (if-let* ((session (copilot-ide--current-session)))
+         (message "Session already running: %s" (copilot-ide--session-label session))
+       (call-interactively #',command))))
+
+(copilot-ide--define-start-command copilot-ide--start-if-no-session copilot-ide)
+(copilot-ide--define-start-command copilot-ide--continue-if-no-session copilot-ide-continue)
+(copilot-ide--define-start-command copilot-ide--resume-if-no-session copilot-ide-resume)
 
 (defun copilot-ide-show-version-info ()
-  "Show version information for the Copilot CLI."
+  "Show version information for the agent CLI."
   (interactive)
-  (if (copilot-ide--ensure-cli)
+  (if (copilot-ide--cli-available-p)
       (let ((output (with-temp-buffer
-                      (call-process copilot-ide-cli-path nil t nil "--version")
+                      (call-process (copilot-ide--program) nil t nil "--version")
                       (buffer-string))))
-        (with-output-to-temp-buffer "*Copilot CLI Version*"
-          (princ "Copilot CLI Version Information\n")
-          (princ "================================\n\n")
-          (princ output)
-          (princ "\n\nExecutable path: ")
-          (princ (executable-find copilot-ide-cli-path))))
-    (user-error "Copilot CLI not available")))
+        (with-output-to-temp-buffer "*copilot-ide version*"
+          (princ (format "%s CLI version\n\n%s\nExecutable: %s\n"
+                         (copilot-ide--agent-name) output
+                         (executable-find (copilot-ide--program))))))
+    (user-error "%s CLI not available" (copilot-ide--agent-name))))
 
 (defun copilot-ide-toggle-debug-mode ()
   "Toggle Emacs-side debug logging."
   (interactive)
   (setq copilot-ide-debug (not copilot-ide-debug))
-  (message "Copilot CLI debug mode %s" (if copilot-ide-debug "enabled" "disabled")))
+  (message "copilot-ide debug mode %s" (if copilot-ide-debug "enabled" "disabled")))
 
 ;;; Transient Suffix Definitions
 
+(transient-define-suffix copilot-ide--set-agent (agent)
+  "Set the agent that new sessions run."
+  :description (lambda () (format "Agent (%s)" copilot-ide-agent))
+  (interactive (list (intern (completing-read
+                              "Agent: "
+                              (mapcar (lambda (a) (symbol-name (car a))) copilot-ide-agents)
+                              nil t nil nil (symbol-name copilot-ide-agent)))))
+  (setq copilot-ide-agent agent)
+  (message "Agent set to %s" agent))
+
 (transient-define-suffix copilot-ide--set-window-side (side)
-  "Set which side the Copilot window appears on."
+  "Set which side the session window appears on."
   :description "Set window side"
   (interactive (list (intern (completing-read "Window side: "
                                               '("left" "right" "top" "bottom")
@@ -155,35 +135,37 @@
   (message "Window side set to %s" side))
 
 (transient-define-suffix copilot-ide--set-window-width (width)
-  "Set Copilot window width."
+  "Set the session window width."
   :description "Set window width"
   (interactive (list (read-number "Window width: " copilot-ide-window-width)))
   (setq copilot-ide-window-width width)
   (message "Window width set to %d" width))
 
 (transient-define-suffix copilot-ide--set-window-height (height)
-  "Set Copilot window height."
+  "Set the session window height."
   :description "Set window height"
   (interactive (list (read-number "Window height: " copilot-ide-window-height)))
   (setq copilot-ide-window-height height)
   (message "Window height set to %d" height))
 
 (transient-define-suffix copilot-ide--set-cli-path (path)
-  "Set the Copilot CLI executable path."
+  "Set the agent executable path (empty input resets to the default)."
   :description "Set CLI path"
-  (interactive (list (read-file-name "Copilot CLI path: " nil copilot-ide-cli-path t)))
+  (interactive (list (let ((path (read-file-name "Agent CLI path (empty for default): "
+                                                 nil "" nil)))
+                       (unless (string-empty-p path) path))))
   (setq copilot-ide-cli-path path)
-  (message "CLI path set to %s" path))
+  (message "CLI path set to %s" (or path "the agent default")))
 
 (transient-define-suffix copilot-ide--set-cli-extra-flags (flags)
-  "Set additional CLI flags to pass to Copilot."
+  "Set additional CLI flags to pass to the agent."
   :description "Set extra CLI flags"
   (interactive (list (read-string "Additional CLI flags: " copilot-ide-cli-extra-flags)))
   (setq copilot-ide-cli-extra-flags flags)
   (message "CLI extra flags set to: %s" flags))
 
 (transient-define-suffix copilot-ide--toggle-focus-on-open ()
-  "Toggle whether the Copilot window is focused when opened."
+  "Toggle whether the session window is focused when opened."
   (interactive)
   (setq copilot-ide-focus-on-open (not copilot-ide-focus-on-open))
   (message "Focus on open %s" (if copilot-ide-focus-on-open "enabled" "disabled")))
@@ -197,6 +179,7 @@
 (defun copilot-ide--save-config ()
   "Persist current configuration via customize."
   (interactive)
+  (customize-save-variable 'copilot-ide-agent copilot-ide-agent)
   (customize-save-variable 'copilot-ide-window-side copilot-ide-window-side)
   (customize-save-variable 'copilot-ide-window-width copilot-ide-window-width)
   (customize-save-variable 'copilot-ide-window-height copilot-ide-window-height)
@@ -208,19 +191,23 @@
 
 ;;; Transient Menus
 
-;;;###autoload (autoload 'copilot-ide-menu "copilot-ide-transient" "Copilot CLI main menu." t)
+;;;###autoload (autoload 'copilot-ide-menu "copilot-ide-transient" "Agent session menu." t)
 (transient-define-prefix copilot-ide-menu ()
-  "Copilot CLI main menu."
+  "Agent session menu."
   [:description copilot-ide--session-status]
-  ["Copilot CLI"
+  ["Agent"
    ["Session"
-    ("s" copilot-ide--start-if-no-session :description copilot-ide--start-description)
-    ("c" copilot-ide--continue-if-no-session :description copilot-ide--continue-description)
-    ("r" copilot-ide--resume-if-no-session :description copilot-ide--resume-description)
+    ("s" copilot-ide--start-if-no-session
+     :description (lambda () (copilot-ide--describe-start "Start new session")))
+    ("c" copilot-ide--continue-if-no-session
+     :description (lambda () (copilot-ide--describe-start "Continue most recent session")))
+    ("r" copilot-ide--resume-if-no-session
+     :description (lambda () (copilot-ide--describe-start "Resume previous session")))
+    ("a" "Start a specific agent" copilot-ide-start-agent)
     ("q" "Stop current session" copilot-ide-stop)
     ("l" "List all sessions" copilot-ide-list-sessions)]
    ["Navigation"
-    ("b" "Switch to Copilot buffer" copilot-ide-switch-to-buffer)
+    ("b" "Switch to session buffer" copilot-ide-switch-to-buffer)
     ("w" "Toggle window" copilot-ide-toggle)
     ("W" "Toggle recent window" copilot-ide-toggle-recent)]
    ["Interaction"
@@ -232,8 +219,8 @@
     ("d" "Debugging" copilot-ide-debug-menu)]])
 
 (transient-define-prefix copilot-ide-config-menu ()
-  "Copilot CLI configuration menu."
-  ["Copilot CLI Configuration"
+  "Configuration menu."
+  ["Configuration"
    ["Window Settings"
     ("s" "Set window side" copilot-ide--set-window-side)
     ("w" "Set window width" copilot-ide--set-window-width)
@@ -245,14 +232,15 @@
      :description (lambda () (format "Use side window (%s)"
                                      (if copilot-ide-use-side-window "ON" "OFF"))))]
    ["CLI Settings"
+    ("a" copilot-ide--set-agent)
     ("p" "Set CLI path" copilot-ide--set-cli-path)
     ("x" "Set extra CLI flags" copilot-ide--set-cli-extra-flags)]]
   ["Save"
    ("S" "Save configuration" copilot-ide--save-config)])
 
 (transient-define-prefix copilot-ide-debug-menu ()
-  "Copilot CLI debug menu."
-  ["Copilot CLI Debug"
+  "Debug menu."
+  ["Debug"
    ["Status"
     ("S" "Check CLI status" copilot-ide-check-status)
     ("v" "Show version info" copilot-ide-show-version-info)]

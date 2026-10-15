@@ -1,4 +1,4 @@
-;;; copilot-ide.el --- GitHub Copilot CLI integration for Emacs  -*- lexical-binding: t; -*-
+;;; copilot-ide.el --- Run Copilot CLI or Claude Code in Emacs  -*- lexical-binding: t; -*-
 
 ;; Author: Tobias Hammer <tohammer@users.noreply.github.com>
 ;; Maintainer: Tobias Hammer <tohammer@users.noreply.github.com>
@@ -9,8 +9,8 @@
 ;; https://github.com/manzaltu/claude-code-ide.el
 
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (transient "0.9.0") (web-server "0.1.2"))
-;; Keywords: ai, copilot, mcp, assistant
+;; Package-Requires: ((emacs "28.1") (transient "0.9.0") (ghostel "0.56.0"))
+;; Keywords: ai, copilot, claude, mcp, assistant
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; URL: https://github.com/tohammer/copilot-ide.el
 
@@ -31,570 +31,231 @@
 
 ;;; Commentary:
 
-;; Emacs integration for the GitHub Copilot CLI.
-;;
-;; Runs `copilot' in a terminal buffer (vterm or eat) inside a side window
-;; and optionally connects an HTTP MCP server so Copilot can call Emacs
-;; functions such as xref, imenu, and tree-sitter.
+;; Runs an AI coding agent CLI -- GitHub Copilot CLI (`copilot') or
+;; Claude Code (`claude') -- in a ghostel terminal buffer, one session
+;; per project, and optionally connects an HTTP MCP server so the
+;; agent can call Emacs functions such as xref, imenu and tree-sitter.
 ;;
 ;; Basic usage:
-;;   M-x copilot-ide          Start a session for the current project
-;;   M-x copilot-ide-stop     Stop the current session
+;;   M-x copilot-ide          Start (or toggle) the session for the project
+;;   M-x copilot-ide-stop     Stop the session
 ;;   M-x copilot-ide-menu     Open the transient menu
 ;;
-;; To enable Emacs MCP tools (xref, imenu, treesit, project info):
+;; Choose the agent with `copilot-ide-agent'.  To enable the Emacs MCP
+;; tools (xref, imenu, treesit, project info, diagnostics):
 ;;   (copilot-ide-emacs-tools-setup)
-;;
-;; The MCP server is exposed to Copilot via `--mcp-config' at startup.
 
 ;;; Code:
 
 (require 'cl-lib)
+(require 'json)
 (require 'project)
+(require 'subr-x)
 (require 'copilot-ide-debug)
 (require 'copilot-ide-transient)
 (require 'copilot-ide-mcp-server)
 (require 'copilot-ide-diagnostics)
 (require 'copilot-ide-emacs-tools)
 
-;; External variable declarations
-(defvar eat-terminal)
-(defvar eat--synchronize-scroll-function)
-(defvar vterm-shell)
-(defvar vterm-environment)
-(defvar eat-term-name)
-(defvar vterm--process)
-
-;; External function declarations for vterm
-(declare-function vterm "vterm" (&optional arg))
-(declare-function vterm-send-string "vterm" (string))
-(declare-function vterm-send-escape "vterm" ())
-(declare-function vterm-send-return "vterm" ())
-(declare-function vterm--window-adjust-process-window-size "vterm" (&optional frame))
-
-;; External function declarations for eat
-(declare-function eat-mode "eat" ())
-(declare-function eat-exec "eat" (buffer name command startfile &rest switches))
-(declare-function eat-term-send-string "eat" (terminal string))
-(declare-function eat-term-display-cursor "eat" (terminal))
-(declare-function eat-term-display-beginning "eat" (terminal))
-(declare-function eat-term-size "eat" (terminal))
-(declare-function eat-term-resize "eat" (terminal width height))
-(declare-function eat-term-redisplay "eat" (terminal))
-(declare-function eat--adjust-process-window-size "eat" (process windows))
-
-;; External variable/function declarations for ghostel
-(defvar ghostel-kill-buffer-on-exit)
 (defvar ghostel-environment)
+(defvar ghostel-exit-functions)
+(defvar ghostel-kill-buffer-on-exit)
 (defvar ghostel--input-mode)
 (declare-function ghostel-exec "ghostel" (buffer program &optional args identity))
 (declare-function ghostel-send-string "ghostel" (string))
+(declare-function ghostel-paste-string "ghostel" (string))
+(declare-function hide-mode-line-mode "hide-mode-line" (&optional arg))
 
 ;;; Customization
 
 (defgroup copilot-ide nil
-  "GitHub Copilot CLI integration for Emacs."
+  "Run AI coding agent CLIs (Copilot, Claude) in Emacs."
   :group 'tools
   :prefix "copilot-ide-")
 
-(defcustom copilot-ide-cli-path "copilot"
-  "Path to the GitHub Copilot CLI executable."
-  :type 'string
+(defconst copilot-ide-agents
+  '((copilot :name "Copilot"
+             :program "copilot"
+             :mcp-config-flag "--additional-mcp-config"
+             :available-tools-flag "--available-tools"
+             :excluded-tools-flag "--excluded-tools"
+             :allow-tools-flag "--allow-tool"
+             :deny-tools-flag "--deny-tool")
+    (claude :name "Claude"
+            :program "claude"
+            :mcp-config-flag "--mcp-config"
+            :available-tools-flag nil
+            :excluded-tools-flag "--disallowedTools"
+            :allow-tools-flag "--allowedTools"
+            :deny-tools-flag "--disallowedTools"))
+  "The supported agents and how their command line is built.
+Each entry is (AGENT . PLIST).  PLIST keys:
+  :name                  Display name.
+  :program               Default executable.
+  :mcp-config-flag       Flag that takes the MCP server JSON.
+  :available-tools-flag  Flag for `copilot-ide-mcp-available-tools', or nil.
+  :excluded-tools-flag   Flag for `copilot-ide-mcp-excluded-tools'.
+  :allow-tools-flag      Flag for `copilot-ide-mcp-allow-tools'.
+  :deny-tools-flag       Flag for `copilot-ide-mcp-deny-tools'.")
+
+(defcustom copilot-ide-agent 'copilot
+  "The agent CLI that new sessions run.
+`copilot' runs the GitHub Copilot CLI, `claude' runs Claude Code."
+  :type '(choice (const :tag "GitHub Copilot CLI" copilot)
+                 (const :tag "Claude Code" claude))
   :group 'copilot-ide)
 
-(defcustom copilot-ide-buffer-name-function #'copilot-ide--default-buffer-name
-  "Function to generate buffer names for Copilot sessions.
-Called with one argument (the working directory string)."
-  :type 'function
+(defcustom copilot-ide-cli-path nil
+  "Path to the agent executable.
+When nil, the agent's default program (\"copilot\" or \"claude\") is
+looked up on the variable `exec-path'."
+  :type '(choice (const :tag "Agent default" nil) string)
   :group 'copilot-ide)
 
 (defcustom copilot-ide-cli-extra-flags ""
-  "Additional flags to pass to the Copilot CLI (space-separated string)."
+  "Additional flags passed to the agent, as a shell-like string.
+The string is split with `split-string-shell-command', so quoting works
+as in a shell, but nothing is expanded."
   :type 'string
   :group 'copilot-ide)
 
+(defcustom copilot-ide-environment nil
+  "Extra environment variables for the agent process.
+A list of \"NAME=VALUE\" strings; they take precedence over the
+variables ghostel sets."
+  :type '(repeat string)
+  :group 'copilot-ide)
+
+(defcustom copilot-ide-buffer-name-function #'copilot-ide--default-buffer-name
+  "Function that returns the buffer name for a session.
+Called with two arguments: the project directory and the agent symbol.
+When another buffer already has that name, a unique name is derived
+from it."
+  :type 'function
+  :group 'copilot-ide)
+
 (defcustom copilot-ide-window-side 'right
-  "Side of the frame where the Copilot window appears."
+  "Side of the frame where the session window appears."
   :type '(choice (const left) (const right) (const top) (const bottom))
   :group 'copilot-ide)
 
 (defcustom copilot-ide-window-width 100
-  "Width of the Copilot side window (columns), for left/right placement."
+  "Width of the session side window (columns), for left/right placement."
   :type 'integer
   :group 'copilot-ide)
 
 (defcustom copilot-ide-window-height 20
-  "Height of the Copilot side window (lines), for top/bottom placement."
+  "Height of the session side window (lines), for top/bottom placement."
   :type 'integer
   :group 'copilot-ide)
 
 (defcustom copilot-ide-focus-on-open t
-  "When non-nil, focus the Copilot window when it is opened."
+  "When non-nil, select the session window when it is displayed."
   :type 'boolean
   :group 'copilot-ide)
 
 (defcustom copilot-ide-use-side-window t
-  "When non-nil, display Copilot in a dedicated side window.
-When nil, use a regular buffer display."
+  "When non-nil, display sessions in a dedicated side window.
+When nil, display them with `pop-to-buffer-same-window', which
+honors `display-buffer-alist' (and thus popup rules)."
   :type 'boolean
   :group 'copilot-ide)
 
 (defcustom copilot-ide-show-modeline t
-  "When non-nil, ensure the modeline is visible in the Copilot buffer.
-Some terminal modes (e.g. vterm via Doom Emacs) hide the modeline by default;
-this option overrides that behaviour."
-  :type 'boolean
-  :group 'copilot-ide)
-
-(defcustom copilot-ide-terminal-backend 'vterm
-  "Terminal backend to use for running Copilot CLI.
-Either `vterm', `eat', or `ghostel'."
-  :type '(choice (const :tag "vterm" vterm)
-                 (const :tag "eat" eat)
-                 (const :tag "ghostel" ghostel))
-  :group 'copilot-ide)
-
-(defcustom copilot-ide-terminal-initialization-delay 0.1
-  "Seconds to wait after creating the terminal before displaying it."
-  :type 'number
-  :group 'copilot-ide)
-
-(defcustom copilot-ide-eat-preserve-position t
-  "When non-nil, preserve the terminal cursor position in eat buffers."
+  "When non-nil, ensure the mode line is visible in the session buffer.
+Some configurations (e.g. Doom Emacs) hide the mode line in terminal
+buffers; this option turns `hide-mode-line-mode' off again."
   :type 'boolean
   :group 'copilot-ide)
 
 (defcustom copilot-ide-emacs-keybindings '()
-  "Keys to handle with their normal Emacs bindings instead of forwarding to the terminal.
-Each entry is a key string accepted by `kbd'.  The key's global binding
-at the time the session starts will be used.  Add any key here that you
-want Emacs to handle rather than the terminal process."
+  "Keys handled by their global Emacs binding instead of the terminal.
+Each entry is a key string accepted by `kbd'.  The global binding at
+the time the session starts is used."
+  :type '(repeat string)
+  :group 'copilot-ide)
+
+(defcustom copilot-ide-mcp-available-tools nil
+  "Tools the agent may use at all (an allow list for the model).
+Entries use the agent's own syntax.  Copilot only (`--available-tools'):
+\"ServerName\" or \"ServerName(tool_name)\".  Claude Code has no
+equivalent; the option is ignored with a warning there."
+  :type '(repeat string)
+  :group 'copilot-ide)
+
+(defcustom copilot-ide-mcp-excluded-tools nil
+  "Tools the agent may not use at all.
+Entries use the agent's own syntax.  Copilot (`--excluded-tools'):
+\"ServerName\" or \"ServerName(tool_name)\".  Claude
+\(`--disallowedTools'): e.g. \"mcp__server\" or \"mcp__server__tool\"."
+  :type '(repeat string)
+  :group 'copilot-ide)
+
+(defcustom copilot-ide-mcp-allow-tools nil
+  "Tools the agent may run without asking for permission.
+Entries use the agent's own syntax.  Copilot (`--allow-tool'):
+\"ServerName\", \"ServerName(tool_name)\" or e.g. \"shell(git)\".
+Claude (`--allowedTools'): e.g. \"mcp__emacs-tools\",
+\"mcp__emacs-tools__imenu_list_symbols\" or \"Bash(git log:*)\"."
+  :type '(repeat string)
+  :group 'copilot-ide)
+
+(defcustom copilot-ide-mcp-deny-tools nil
+  "Tools the agent must never run.
+Entries use the agent's own syntax.  Copilot (`--deny-tool', takes
+precedence over `--allow-tool').  Claude (`--disallowedTools')."
   :type '(repeat string)
   :group 'copilot-ide)
 
 ;;; State
 
-(defvar copilot-ide--cli-available nil
-  "Non-nil when the Copilot CLI executable has been detected.")
+(cl-defstruct (copilot-ide--session (:constructor copilot-ide--session-create)
+                                    (:copier nil))
+  "A running agent session."
+  agent directory buffer process id)
 
-(defvar copilot-ide--processes (make-hash-table :test 'equal)
-  "Hash table mapping project directories to Copilot process objects.")
-
-(defvar copilot-ide--session-ids (make-hash-table :test 'equal)
-  "Hash table mapping project directories to MCP session IDs.")
+(defvar copilot-ide--sessions (make-hash-table :test 'equal)
+  "Hash table mapping project directories to `copilot-ide--session's.")
 
 (defvar copilot-ide--last-accessed-buffer nil
-  "Most recently displayed Copilot terminal buffer.")
+  "Most recently displayed session buffer.")
 
-;;; Terminal Backend: vterm helpers
+(defvar-local copilot-ide--buffer-session nil
+  "The session shown in this buffer, or nil.")
 
-(defcustom copilot-ide-vterm-anti-flicker t
-  "Batch rapid vterm output sequences to reduce terminal flicker.
-When enabled, detects high-density escape sequences (TUI redraws) and
-batches them into a single redisplay update."
-  :type 'boolean
-  :group 'copilot-ide)
+(defvar-local copilot-ide--keybinding-override nil
+  "Non-nil enables the session key overrides in this buffer.
+Used as the key of an entry in `minor-mode-overriding-map-alist'.")
 
-(defcustom copilot-ide-vterm-render-delay 0.005
-  "Delay in seconds for batched vterm rendering when anti-flicker is active."
-  :type 'number
-  :group 'copilot-ide)
+;;; Agents
 
-(defcustom copilot-ide-mcp-available-tools nil
-  "List of MCP tools to whitelist (only these tools will be available).
-When non-nil, Copilot will only have access to the specified tools.
-When nil, all tools are available (unless blacklisted).
+(defun copilot-ide--agent-get (property &optional agent)
+  "Return PROPERTY of AGENT (default `copilot-ide-agent')."
+  (let ((agent (or agent copilot-ide-agent)))
+    (plist-get (or (alist-get agent copilot-ide-agents)
+                   (user-error "Unknown agent: %s" agent))
+               property)))
 
-Format: Each entry can be:
-  - \"ServerName\" - whitelist all tools from that MCP server
-  - \"ServerName(tool_name)\" - whitelist a specific tool from a server
+(defun copilot-ide--agent-name (&optional agent)
+  "Return the display name of AGENT (default `copilot-ide-agent')."
+  (copilot-ide--agent-get :name agent))
 
-Examples:
-  (\"my-server\" \"other-server(some_tool)\")
-  - Whitelists all tools from my-server
-  - Whitelists only some_tool from other-server
+(defun copilot-ide--program (&optional agent)
+  "Return the executable for AGENT (default `copilot-ide-agent')."
+  (or copilot-ide-cli-path (copilot-ide--agent-get :program agent)))
 
-Note: This uses `--available-tools' CLI flag which controls model access.
-For permission-based control (auto-approve), see `copilot-ide-mcp-allow-tools'."
-  :type '(repeat string)
-  :group 'copilot-ide)
+(defun copilot-ide--cli-available-p (&optional agent)
+  "Return non-nil if the executable for AGENT can be found."
+  (let ((program (copilot-ide--program agent)))
+    (if (file-name-directory program)
+        (file-executable-p (expand-file-name program))
+      (executable-find program))))
 
-(defcustom copilot-ide-mcp-excluded-tools nil
-  "List of MCP tools to blacklist (these tools will not be available).
-When non-nil, Copilot will not have access to the specified tools.
+;;; Sessions
 
-Format: Each entry can be:
-  - \"ServerName\" - blacklist all tools from that MCP server
-  - \"ServerName(tool_name)\" - blacklist a specific tool from a server
-
-Examples:
-  (\"untrusted-server\" \"other-server(dangerous_tool)\")
-  - Blacklists all tools from untrusted-server
-  - Blacklists only dangerous_tool from other-server
-
-Note: This uses `--excluded-tools' CLI flag which controls model access."
-  :type '(repeat string)
-  :group 'copilot-ide)
-
-(defcustom copilot-ide-mcp-allow-tools nil
-  "List of MCP tools to auto-approve (no confirmation prompt).
-These tools will execute without asking for permission.
-
-Format: Each entry can be:
-  - \"ServerName\" - auto-approve all tools from that MCP server
-  - \"ServerName(tool_name)\" - auto-approve a specific tool from a server
-
-Examples:
-  (\"trusted-server\" \"other-server(safe_read_tool)\")
-
-Note: This uses `--allow-tool' CLI flag which controls permissions,
-not availability. Tools must also be available (not excluded)."
-  :type '(repeat string)
-  :group 'copilot-ide)
-
-(defcustom copilot-ide-mcp-deny-tools nil
-  "List of MCP tools to always deny (will prompt but block execution).
-These tools will be denied even if explicitly requested.
-
-Format: Each entry can be:
-  - \"ServerName\" - deny all tools from that MCP server
-  - \"ServerName(tool_name)\" - deny a specific tool from a server
-
-Examples:
-  (\"any-server(destructive_tool)\" \"other-server(unsafe_write)\")
-
-Note: This uses `--deny-tool' CLI flag which takes precedence
-over `--allow-tool'."
-  :type '(repeat string)
-  :group 'copilot-ide)
-
-(defvar-local copilot-ide--vterm-render-queue nil
-  "Pending output strings for batched vterm rendering (reverse order).")
-
-(defvar-local copilot-ide--vterm-render-timer nil
-  "Timer for flushing the vterm render queue.")
-
-(defvar-local copilot-ide--saved-cursor-type nil
-  "Saved cursor-type when entering vterm copy mode.")
-
-(defun copilot-ide--count-escape-sequence (sequence input)
-  "Count occurrences of SEQUENCE in INPUT efficiently."
-  (let ((count 0) (start 0))
-    (while (setq start (string-search sequence input start))
-      (cl-incf count)
-      (cl-incf start (length sequence)))
-    count))
-
-(defun copilot-ide--vterm-smart-renderer (orig-fun process input)
-  "Batch rapid vterm output to reduce TUI flicker.
-Wraps ORIG-FUN; detects high-density escape sequences and defers
-rendering until a quiet moment.  PROCESS and INPUT are passed through."
-  (if (not copilot-ide-vterm-anti-flicker)
-      (funcall orig-fun process input)
-    (with-current-buffer (process-buffer process)
-      ;; Fast path: no escapes and no active queue → pass through immediately
-      (if (and (not copilot-ide--vterm-render-queue)
-               (not (string-search "\033" input)))
-          (funcall orig-fun process input)
-        (let* ((complex-redraw
-                (string-match-p "\033\\[[0-9]*A.*\033\\[K.*\033\\[[0-9]*A.*\033\\[K" input))
-               (clear-count (copilot-ide--count-escape-sequence "\033[K" input))
-               (escape-count (cl-count ?\033 input))
-               (escape-density (if (> (length input) 0)
-                                   (/ (float escape-count) (length input)) 0)))
-          (if (or complex-redraw
-                  (and (> escape-density 0.3) (>= clear-count 2))
-                  copilot-ide--vterm-render-queue)
-              (progn
-                (push input copilot-ide--vterm-render-queue)
-                (when copilot-ide--vterm-render-timer
-                  (cancel-timer copilot-ide--vterm-render-timer))
-                (setq copilot-ide--vterm-render-timer
-                      (run-at-time copilot-ide-vterm-render-delay nil
-                                   (lambda (buf)
-                                     (when (buffer-live-p buf)
-                                       (with-current-buffer buf
-                                         (when copilot-ide--vterm-render-queue
-                                           (let* ((inhibit-redisplay t)
-                                                  (data (apply #'concat
-                                                               (nreverse copilot-ide--vterm-render-queue))))
-                                             (setq copilot-ide--vterm-render-queue nil
-                                                   copilot-ide--vterm-render-timer nil)
-                                             (funcall orig-fun
-                                                      (get-buffer-process buf)
-                                                      data))))))
-                                   (current-buffer))))
-            (funcall orig-fun process input)))))))
-
-(defun copilot-ide--vterm-copy-mode-hook ()
-  "Preserve cursor visibility when entering/leaving vterm copy mode."
-  (if vterm-copy-mode
-      (progn
-        (setq copilot-ide--saved-cursor-type cursor-type)
-        (when (null cursor-type) (setq cursor-type t)))
-    (setq cursor-type copilot-ide--saved-cursor-type)))
-
-(defun copilot-ide--eat-emacs-mode-cursor-fix (&rest _)
-  "Ensure cursor is visible when switching to eat emacs mode."
-  (when (and (copilot-ide--session-buffer-p (current-buffer))
-             (null cursor-type))
-    (setq-local cursor-type t)))
-
-(defun copilot-ide--eat-terminal-mode-cursor-fix (&rest _)
-  "Restore invisible cursor when leaving eat emacs mode in a Copilot buffer."
-  (when (copilot-ide--session-buffer-p (current-buffer))
-    (setq-local cursor-type nil)))
-
-(defun copilot-ide--configure-vterm-buffer ()
-  "Configure vterm buffer settings for a Copilot session."
-  (setq-local vterm-scroll-to-bottom-on-output nil)
-  (when (boundp 'vterm--redraw-immididately)
-    (setq-local vterm--redraw-immididately nil))
-  (setq-local cursor-in-non-selected-windows nil)
-  (setq-local blink-cursor-mode nil)
-  (setq-local cursor-type nil)
-  (setq-local global-hl-line-mode nil)
-  (when (featurep 'hl-line) (hl-line-mode -1))
-  (face-remap-add-relative 'nobreak-space :inherit 'default)
-  (add-hook 'vterm-copy-mode-hook #'copilot-ide--vterm-copy-mode-hook nil t)
-  (when-let* ((proc (get-buffer-process (current-buffer))))
-    (set-process-query-on-exit-flag proc nil))
-  (when copilot-ide-vterm-anti-flicker
-    (advice-add 'vterm--filter :around #'copilot-ide--vterm-smart-renderer)))
-
-;;; Terminal Backend Abstraction
-
-(defun copilot-ide--terminal-ensure-backend ()
-  "Signal an error if the configured terminal backend is not available."
-  (cond
-   ((eq copilot-ide-terminal-backend 'vterm)
-    (unless (featurep 'vterm) (require 'vterm nil t))
-    (unless (featurep 'vterm)
-      (user-error "vterm is not installed.  Install it or set `copilot-ide-terminal-backend' to 'eat")))
-   ((eq copilot-ide-terminal-backend 'eat)
-    (unless (featurep 'eat) (require 'eat nil t))
-    (unless (featurep 'eat)
-      (user-error "eat is not installed.  Install it or set `copilot-ide-terminal-backend' to 'vterm")))
-   ((eq copilot-ide-terminal-backend 'ghostel)
-    (unless (featurep 'ghostel) (require 'ghostel nil t))
-    (unless (featurep 'ghostel)
-      (user-error "ghostel is not installed.  Install it or set `copilot-ide-terminal-backend' to 'vterm or 'eat")))
-   (t
-    (user-error "Invalid terminal backend: %s.  Use 'vterm, 'eat, or 'ghostel" copilot-ide-terminal-backend))))
-
-(defun copilot-ide--terminal-send-string (string)
-  "Send STRING to the terminal in the current buffer."
-  (cond
-   ((eq copilot-ide-terminal-backend 'vterm) (vterm-send-string string))
-   ((eq copilot-ide-terminal-backend 'eat)
-    (when eat-terminal (eat-term-send-string eat-terminal string)))
-   ((eq copilot-ide-terminal-backend 'ghostel) (ghostel-send-string string))
-   (t (error "Unknown terminal backend: %s" copilot-ide-terminal-backend))))
-
-(defun copilot-ide--terminal-send-escape ()
-  "Send the escape key to the terminal in the current buffer."
-  (cond
-   ((eq copilot-ide-terminal-backend 'vterm) (vterm-send-escape))
-   ((eq copilot-ide-terminal-backend 'eat)
-    (when eat-terminal (eat-term-send-string eat-terminal "\e")))
-   ((eq copilot-ide-terminal-backend 'ghostel) (ghostel-send-string "\e"))
-   (t (error "Unknown terminal backend: %s" copilot-ide-terminal-backend))))
-
-(defun copilot-ide--ghostel-forward-c-underscore ()
-  "Forward C-_ to the ghostel terminal in input modes, else run its usual command.
-C-_ is not in ghostel's default `ghostel-keymap-exceptions', so ghostel's own
-local keymap forwards it to the terminal -- but that local map sits below
-`minor-mode-map-alist' in Emacs's key lookup, so any other active global minor
-mode bound to C-_ (e.g. undo-related modes) shadows it before it ever reaches
-ghostel.  Reasserting the forward here, ahead of `minor-mode-map-alist' via
-`minor-mode-overriding-map-alist', lets Copilot's own undo (rather than
-Emacs's) receive C-_ while typing in the terminal.
-
-Note: as of Copilot CLI 1.0.80, its input-line editor does not actually
-implement undo -- C-_ reaches the CLI correctly but is a no-op there, even in
-a plain native terminal outside Emacs.  See
-https://github.com/github/copilot-cli/issues/941."
-  (interactive)
-  (if (memq ghostel--input-mode '(semi-char char))
-      (ghostel-send-string (string ?\C-_))
-    (when-let* ((binding (global-key-binding (kbd "C-_"))))
-      (call-interactively binding))))
-
-(defun copilot-ide--terminal-send-return ()
-  "Send return to the terminal in the current buffer."
-  (cond
-   ((eq copilot-ide-terminal-backend 'vterm) (vterm-send-return))
-   ((eq copilot-ide-terminal-backend 'eat)
-    (when eat-terminal (eat-term-send-string eat-terminal "\r")))
-   ((eq copilot-ide-terminal-backend 'ghostel) (ghostel-send-string "\r"))
-   (t (error "Unknown terminal backend: %s" copilot-ide-terminal-backend))))
-
-(defun copilot-ide--sync-terminal-dimensions (buffer window)
-  "Sync the terminal process dimensions in BUFFER to match WINDOW.
-Ghostel resizes itself automatically via its own buffer-local
-`window-size-change-functions' hook, so no action is taken here for it."
-  (when (and buffer window (buffer-live-p buffer) (window-live-p window)
-             (not (eq copilot-ide-terminal-backend 'ghostel)))
-    (with-current-buffer buffer
-      (when-let* ((proc (get-buffer-process buffer)))
-        (cond
-         ((and (eq copilot-ide-terminal-backend 'eat)
-               (bound-and-true-p eat-terminal))
-          (with-selected-window window
-            (let ((width (max (window-max-chars-per-line) 1))
-                  (height (max (floor (window-screen-lines)) 1))
-                  (inhibit-read-only t))
-              ;; Update cached width to prevent reflow filter from blocking
-              ;; subsequent height-only resizes
-              (set-window-parameter window 'copilot-ide-cached-width
-                                    (window-width window))
-              (eat-term-resize eat-terminal width height)
-              (eat-term-redisplay eat-terminal))))
-         (t
-          (set-process-window-size proc
-                                   (window-body-height window)
-                                   (window-body-width window))))))))
-
-(defvar-local copilot-ide--ghostel-keybinding-override nil
-  "Non-nil activates `copilot-ide' key forwarding overrides in ghostel buffers.
-Used only as a dummy key into `minor-mode-overriding-map-alist'; see
-`copilot-ide--setup-terminal-keybindings'.")
-
-(defun copilot-ide--setup-terminal-keybindings ()
-  "Bind Copilot-specific keys in the current terminal buffer.
-Keys in `copilot-ide-emacs-keybindings' are intercepted and handled
-by their normal Emacs global binding instead of forwarding to the terminal."
-  (local-set-key (kbd "S-<return>") #'copilot-ide-insert-newline)
-  (local-set-key (kbd "C-<escape>") #'copilot-ide-send-escape)
-  (dolist (key copilot-ide-emacs-keybindings)
-    (when-let* ((binding (global-key-binding (kbd key))))
-      (local-set-key (kbd key) binding)))
-  ;; For eat, minor mode keymaps (eat-semi-char-mode-map) take precedence over
-  ;; the buffer-local keymap, so local-set-key alone is insufficient.
-  ;; Use minor-mode-overriding-map-alist (buffer-local) to override eat's
-  ;; semi-char keymap for the intercepted keys.  The parent is set to
-  ;; eat-semi-char-mode-map so that all other keys still fall through to eat's
-  ;; normal handling — minor-mode-overriding-map-alist fully replaces the
-  ;; minor mode's map, so without a parent all unbound keys would bypass
-  ;; eat-self-input and hit self-insert-command on read-only terminal text.
-  (when (eq copilot-ide-terminal-backend 'eat)
-    (let ((override-map (make-sparse-keymap)))
-      (set-keymap-parent override-map eat-semi-char-mode-map)
-      (define-key override-map (kbd "S-<return>") #'copilot-ide-insert-newline)
-      (define-key override-map (kbd "C-<escape>") #'copilot-ide-send-escape)
-      (dolist (key copilot-ide-emacs-keybindings)
-        (when-let* ((binding (global-key-binding (kbd key))))
-          (define-key override-map (kbd key) binding)))
-      (setq-local minor-mode-overriding-map-alist
-                  (cons (cons 'eat--semi-char-mode override-map)
-                        minor-mode-overriding-map-alist))))
-  ;; For ghostel, input modes (semi-char/char/etc.) are switched via
-  ;; `use-local-map', repeatedly replacing the buffer-local keymap, so
-  ;; `local-set-key' bindings above get discarded on the next mode switch.
-  ;; Unlike eat, ghostel's per-mode keymaps are not registered in
-  ;; `minor-mode-map-alist', so a fresh (unrelated) symbol here is simply
-  ;; added to the search ahead of the local keymap, rather than replacing
-  ;; an existing entry -- no parent keymap is needed for other keys to
-  ;; keep falling through to ghostel's own forwarding logic.
-  (when (eq copilot-ide-terminal-backend 'ghostel)
-    (setq-local copilot-ide--ghostel-keybinding-override t)
-    (let ((override-map (make-sparse-keymap)))
-      (define-key override-map (kbd "S-<return>") #'copilot-ide-insert-newline)
-      (define-key override-map (kbd "C-<escape>") #'copilot-ide-send-escape)
-      ;; C-_ is meant to reach Copilot CLI's own undo, but other active
-      ;; global minor modes bound to C-_ would otherwise shadow ghostel's
-      ;; own (lower-priority, local-map-based) forwarding of it.
-      (define-key override-map (kbd "C-_") #'copilot-ide--ghostel-forward-c-underscore)
-      (dolist (key copilot-ide-emacs-keybindings)
-        (when-let* ((binding (global-key-binding (kbd key))))
-          (define-key override-map (kbd key) binding)))
-      (setq-local minor-mode-overriding-map-alist
-                  (cons (cons 'copilot-ide--ghostel-keybinding-override override-map)
-                        minor-mode-overriding-map-alist)))))
-
-;;; Reflow Glitch Prevention
-;;
-;; Suppresses spurious terminal reflows caused by height-only resize events,
-;; which can trigger unwanted scrolling in terminal AI applications.
-
-(defun copilot-ide--terminal-resize-handler ()
-  "Return the terminal resize function for the active backend, or nil.
-Nil means the backend needs no reflow-glitch workaround (e.g. ghostel,
-which manages its own resize/redraw synchronously)."
-  (pcase copilot-ide-terminal-backend
-    ('vterm #'vterm--window-adjust-process-window-size)
-    ('eat #'eat--adjust-process-window-size)
-    ('ghostel nil)
-    (_ (error "Unsupported terminal backend: %s" copilot-ide-terminal-backend))))
-
-(defun copilot-ide--terminal-scroll-mode-active-p ()
-  "Return non-nil when the terminal is in scroll/copy mode."
-  (pcase copilot-ide-terminal-backend
-    ('vterm (bound-and-true-p vterm-copy-mode))
-    ('eat (not (bound-and-true-p eat--semi-char-mode)))
-    (_ nil)))
-
-(defun copilot-ide--session-buffer-p (buffer)
-  "Return non-nil if BUFFER belongs to a Copilot session."
-  (when-let* ((name (if (stringp buffer) buffer (buffer-name buffer))))
-    (string-prefix-p "*copilot-ide[" name)))
-
-(defun copilot-ide--terminal-reflow-filter (original-fn &rest args)
-  "Wrap ORIGINAL-FN to suppress height-only terminal reflows.
-For height-only changes, we still resize the terminal and notify the process,
-but skip the synchronize-scroll that causes view jumping."
-  (cond
-   ((not (copilot-ide--session-buffer-p (current-buffer)))
-    (apply original-fn args))
-   ((copilot-ide--terminal-scroll-mode-active-p)
-    nil)
-   (t
-    (let ((height-only-change t)
-          (current-buf (current-buffer)))
-      ;; Only check windows showing THIS buffer, not all session windows.
-      ;; Otherwise resizing one session's window updates another session's
-      ;; cache, causing the second session's resize to be suppressed.
-      (dolist (win (get-buffer-window-list current-buf nil t))
-        (let* ((new-width (window-width win))
-               (cached-width (window-parameter win 'copilot-ide-cached-width)))
-          (unless (eql new-width cached-width)
-            (setq height-only-change nil)
-            (set-window-parameter win 'copilot-ide-cached-width new-width))))
-      (if (not height-only-change)
-          ;; Width changed: call original function for full resize
-          (apply original-fn args)
-        ;; Height-only change: do the resize but skip synchronize-scroll.
-        ;; We temporarily replace eat--synchronize-scroll-function to no-op.
-        (when (and (eq copilot-ide-terminal-backend 'eat)
-                   (bound-and-true-p eat-terminal))
-          (let ((eat--synchronize-scroll-function #'ignore))
-            (apply original-fn args))))))))
-
-;;; eat position keeper
-
-(defun copilot-ide--terminal-position-keeper (window-list)
-  "Maintain stable eat terminal position across window switches.
-Uses eat's native recenter calculation to ensure the terminal display
-area is properly aligned within each window."
-  (dolist (win window-list)
-    (if (eq win 'buffer)
-        (goto-char (eat-term-display-cursor eat-terminal))
-      (let ((terminal-point (eat-term-display-cursor eat-terminal)))
-        (set-window-point win terminal-point)
-        (with-selected-window win
-          (goto-char terminal-point)
-          (recenter
-           (- (how-many "\n" (eat-term-display-beginning eat-terminal)
-                        terminal-point)
-              (cdr (eat-term-size eat-terminal))
-              (max 0 (- (floor (window-screen-lines))
-                        (cdr (eat-term-size eat-terminal)))))))))))
-
-;;; Session Helpers
-
-(defun copilot-ide--default-buffer-name (directory)
-  "Return the default buffer name for a session in DIRECTORY."
-  (format "*copilot-ide[%s]*"
+(defun copilot-ide--default-buffer-name (directory agent)
+  "Return the default buffer name for AGENT in DIRECTORY."
+  (format "*%s[%s]*" (downcase (copilot-ide--agent-name agent))
           (file-name-nondirectory (directory-file-name directory))))
 
 (defun copilot-ide--get-working-directory ()
@@ -603,350 +264,311 @@ area is properly aligned within each window."
       (expand-file-name (project-root project))
     (expand-file-name default-directory)))
 
-(defun copilot-ide--get-buffer-name (&optional directory)
-  "Return the buffer name for the session in DIRECTORY (or current project)."
-  (funcall copilot-ide-buffer-name-function
-           (or directory (copilot-ide--get-working-directory))))
+(defun copilot-ide--live-session-p (session)
+  "Return non-nil if SESSION's buffer is alive."
+  (and session (buffer-live-p (copilot-ide--session-buffer session))))
 
-(defun copilot-ide--get-process (&optional directory)
-  "Return the Copilot process for DIRECTORY (or current project), or nil."
-  (gethash (or directory (copilot-ide--get-working-directory))
-           copilot-ide--processes))
+(defun copilot-ide--session-for-directory (directory)
+  "Return the live session for DIRECTORY, or nil."
+  (let ((session (gethash directory copilot-ide--sessions)))
+    (when (copilot-ide--live-session-p session) session)))
 
-(defun copilot-ide--set-process (process &optional directory)
-  "Record PROCESS as the Copilot process for DIRECTORY (or current project)."
-  (when (= (hash-table-count copilot-ide--processes) 0)
-    (when-let* ((handler (copilot-ide--terminal-resize-handler)))
-      (advice-add handler :around #'copilot-ide--terminal-reflow-filter)))
-  (puthash (or directory (copilot-ide--get-working-directory))
-           process copilot-ide--processes))
+(defun copilot-ide--current-session ()
+  "Return the session of the current buffer or of the current project."
+  (or (and (copilot-ide--live-session-p copilot-ide--buffer-session)
+           copilot-ide--buffer-session)
+      (copilot-ide--session-for-directory (copilot-ide--get-working-directory))))
 
-(defun copilot-ide--cleanup-dead-processes ()
-  "Remove stale entries from the process table."
-  (maphash (lambda (directory process)
-             (unless (process-live-p process)
-               (remhash directory copilot-ide--processes)))
-           copilot-ide--processes))
+(defun copilot-ide--require-session ()
+  "Return the current session or signal a `user-error'."
+  (or (copilot-ide--current-session)
+      (user-error "No agent session for this project.  Use M-x copilot-ide to start one")))
 
-(defun copilot-ide--cleanup-all-sessions ()
-  "Clean up all active Copilot sessions (called on Emacs exit)."
-  (maphash (lambda (directory _process)
-             (copilot-ide--cleanup-on-exit directory))
-           copilot-ide--processes))
+(defun copilot-ide--live-sessions ()
+  "Return all live sessions."
+  (let (sessions)
+    (maphash (lambda (_dir session)
+               (when (copilot-ide--live-session-p session)
+                 (push session sessions)))
+             copilot-ide--sessions)
+    (nreverse sessions)))
 
-(add-hook 'kill-emacs-hook #'copilot-ide--cleanup-all-sessions)
+(defun copilot-ide--session-label (session)
+  "Return a short description of SESSION for messages."
+  (format "%s in %s" (copilot-ide--agent-name (copilot-ide--session-agent session))
+          (file-name-nondirectory
+           (directory-file-name (copilot-ide--session-directory session)))))
 
 ;;; Active Buffer Tracking
 ;;
-;; When Copilot invokes an MCP tool, the HTTP server needs to know which
-;; Emacs buffer was most recently active so tools like xref operate in the
-;; right context.  We track this via post-command-hook.
+;; When the agent calls an MCP tool, the tools need to know which file
+;; buffer the user last worked in.  A cheap `post-command-hook' records
+;; it whenever the current buffer changes.
+
+(defvar copilot-ide--last-tracked-buffer nil
+  "The buffer seen by the last run of `copilot-ide--track-active-buffer'.")
 
 (defun copilot-ide--track-active-buffer ()
-  "Update the MCP session's last-active-buffer when the user changes buffers."
-  (when-let* ((file-path (buffer-file-name))
-              (project (project-current))
-              (project-dir (expand-file-name (project-root project)))
-              (session-id (gethash project-dir copilot-ide--session-ids)))
-    (copilot-ide-mcp-server-update-last-active-buffer session-id (current-buffer))))
+  "Record the current file buffer as last active for its session."
+  (unless (eq (current-buffer) copilot-ide--last-tracked-buffer)
+    (setq copilot-ide--last-tracked-buffer (current-buffer))
+    (when-let* ((file buffer-file-name)
+                (file (expand-file-name file))
+                (session (cl-find-if
+                          (lambda (s)
+                            (string-prefix-p (copilot-ide--session-directory s) file))
+                          (sort (copilot-ide--live-sessions)
+                                (lambda (a b)
+                                  (> (length (copilot-ide--session-directory a))
+                                     (length (copilot-ide--session-directory b))))))))
+      (copilot-ide-mcp-server-update-last-active-buffer
+       (copilot-ide--session-id session) (current-buffer)))))
 
 ;;; Window Display
 
-(defun copilot-ide--display-buffer-in-side-window (buffer)
-  "Display BUFFER in a Copilot side window and return the window."
+(defun copilot-ide--display-buffer (buffer)
+  "Display BUFFER according to the window options and return the window."
   (let ((window
          (if copilot-ide-use-side-window
-             (let* ((side copilot-ide-window-side)
-                    (display-buffer-alist
-                     `((,(regexp-quote (buffer-name buffer))
-                        (display-buffer-in-side-window)
-                        (side . ,side)
-                        (slot . 0)
-                        ,@(when (memq side '(left right))
-                            `((window-width
-                               . ,(lambda (win)
-                                    (let ((delta (- copilot-ide-window-width
-                                                    (window-body-width win))))
-                                      (unless (zerop delta)
-                                        (window-resize win delta t)))))))
-                        ,@(when (memq side '(top bottom))
-                            `((window-height . ,copilot-ide-window-height)))
-                        (window-parameters . ((no-delete-other-windows . t)))))))
-               (display-buffer buffer))
-           (progn (switch-to-buffer buffer) (selected-window)))))
+             (let ((side copilot-ide-window-side))
+               (display-buffer
+                buffer
+                `((display-buffer-in-side-window)
+                  (side . ,side)
+                  (slot . 0)
+                  ,@(if (memq side '(left right))
+                        `((window-width . ,copilot-ide-window-width))
+                      `((window-height . ,copilot-ide-window-height)))
+                  (dedicated . t)
+                  (window-parameters . ((no-delete-other-windows . t))))))
+           (pop-to-buffer-same-window buffer)
+           (get-buffer-window buffer))))
     (setq copilot-ide--last-accessed-buffer buffer)
-    (when (and window copilot-ide-focus-on-open) (select-window window))
-    (when (and window copilot-ide-use-side-window
-               (memq copilot-ide-window-side '(top bottom)))
-      (set-window-text-height window copilot-ide-window-height)
-      (set-window-dedicated-p window t))
-    (when window (copilot-ide--sync-terminal-dimensions buffer window))
+    (when (and window copilot-ide-focus-on-open)
+      (select-window window))
     window))
 
-;;; Cleanup
+(defun copilot-ide--hide-buffer (buffer)
+  "Hide every window that shows BUFFER in the selected frame."
+  (setq copilot-ide--last-accessed-buffer buffer)
+  (dolist (window (get-buffer-window-list buffer nil))
+    ;; `quit-restore-window' deletes a window that was made for BUFFER
+    ;; (side windows, popups) and shows the previous buffer otherwise.
+    (quit-restore-window window 'bury)))
 
-(defvar copilot-ide--cleanup-in-progress nil
-  "Guard against recursive cleanup.")
-
-(defun copilot-ide--cleanup-on-exit (directory)
-  "Clean up the Copilot session for DIRECTORY."
-  (unless copilot-ide--cleanup-in-progress
-    (setq copilot-ide--cleanup-in-progress t)
-    (unwind-protect
-        (progn
-          (remhash directory copilot-ide--processes)
-          (when (= (hash-table-count copilot-ide--processes) 0)
-            (when-let* ((handler (copilot-ide--terminal-resize-handler)))
-              (advice-remove handler #'copilot-ide--terminal-reflow-filter))
-            (remove-hook 'post-command-hook #'copilot-ide--track-active-buffer))
-          ;; Notify MCP tools server
-          (let ((session-id (gethash directory copilot-ide--session-ids)))
-            (copilot-ide-mcp-server-session-ended session-id)
-            (when session-id (remhash directory copilot-ide--session-ids)))
-          ;; Kill the terminal buffer
-          (let ((buffer-name (copilot-ide--get-buffer-name directory)))
-            (when-let* ((buffer (get-buffer buffer-name)))
-              (when (buffer-live-p buffer)
-                (let ((kill-buffer-hook nil)
-                      (kill-buffer-query-functions nil))
-                  (kill-buffer buffer)))))
-          (copilot-ide-debug "Cleaned up session for %s"
-                             (file-name-nondirectory (directory-file-name directory))))
-      (setq copilot-ide--cleanup-in-progress nil))))
-
-;;; CLI Detection
-
-(defun copilot-ide--detect-cli ()
-  "Detect whether the Copilot CLI executable is available."
-  (setq copilot-ide--cli-available
-        (condition-case nil
-            (eq (call-process copilot-ide-cli-path nil nil nil "--version") 0)
-          (error nil))))
-
-(defun copilot-ide--ensure-cli ()
-  "Return non-nil if the CLI is available (detecting it if necessary)."
-  (unless copilot-ide--cli-available (copilot-ide--detect-cli))
-  copilot-ide--cli-available)
+(defun copilot-ide--toggle-buffer (buffer)
+  "Hide BUFFER if it is visible, otherwise display it."
+  (if (get-buffer-window buffer)
+      (copilot-ide--hide-buffer buffer)
+    (copilot-ide--display-buffer buffer)))
 
 ;;; Command Building
 
-(defun copilot-ide--parse-command-string (command-string)
-  "Parse COMMAND-STRING into a (program . args) cons for eat-exec."
-  (let ((parts (split-string-shell-command command-string)))
-    (cons (car parts) (cdr parts))))
+(defun copilot-ide--tool-flag-args (flag tools)
+  "Return the argument list that passes TOOLS with FLAG, or nil."
+  (when (and flag tools)
+    (list (concat flag "=" (mapconcat #'identity tools ",")))))
 
-(defun copilot-ide--build-command (&optional session-id continue resume)
-  "Build the shell command string for launching Copilot CLI.
-SESSION-ID is embedded in the MCP config URL so the HTTP server can
-route tool calls to the correct Emacs session context.
-CONTINUE, if non-nil, adds --continue to resume the most recent session.
-RESUME, if non-nil, adds --resume (optionally with a session ID string)."
-  (let ((cmd copilot-ide-cli-path))
-    ;; Session resume flags
-    (when continue
-      (setq cmd (concat cmd " --continue")))
+(defun copilot-ide--build-args (agent session-id &optional continue resume)
+  "Return the argument list for AGENT.
+SESSION-ID selects the MCP endpoint.  CONTINUE adds --continue.
+RESUME adds --resume, followed by RESUME itself when it is a string."
+  (let ((get (lambda (prop) (copilot-ide--agent-get prop agent)))
+        (args '()))
+    (when continue (push "--continue" args))
     (when resume
-      (setq cmd (concat cmd " --resume"
-                        (if (stringp resume) (concat " " resume) ""))))
-    ;; Extra user-supplied flags
+      (push "--resume" args)
+      (when (stringp resume) (push resume args)))
+    (setq args (nreverse args))
     (when (and copilot-ide-cli-extra-flags
                (not (string-empty-p copilot-ide-cli-extra-flags)))
-      (setq cmd (concat cmd " " copilot-ide-cli-extra-flags)))
-    ;; MCP tool filtering: availability control
-    (when copilot-ide-mcp-available-tools
-      (setq cmd (concat cmd " --available-tools="
-                        (mapconcat #'shell-quote-argument
-                                   copilot-ide-mcp-available-tools ","))))
-    (when copilot-ide-mcp-excluded-tools
-      (setq cmd (concat cmd " --excluded-tools="
-                        (mapconcat #'shell-quote-argument
-                                   copilot-ide-mcp-excluded-tools ","))))
-    ;; MCP tool filtering: permission control
-    (when copilot-ide-mcp-allow-tools
-      (setq cmd (concat cmd " --allow-tool="
-                        (mapconcat #'shell-quote-argument
-                                   copilot-ide-mcp-allow-tools ","))))
-    (when copilot-ide-mcp-deny-tools
-      (setq cmd (concat cmd " --deny-tool="
-                        (mapconcat #'shell-quote-argument
-                                   copilot-ide-mcp-deny-tools ","))))
-    ;; MCP config injection
+      (setq args (append args (split-string-shell-command copilot-ide-cli-extra-flags))))
+    (when (and copilot-ide-mcp-available-tools
+               (not (funcall get :available-tools-flag)))
+      (display-warning 'copilot-ide
+                       (format "`copilot-ide-mcp-available-tools' is not supported by %s; ignored"
+                               (funcall get :name))))
+    (let ((deny-flag (funcall get :deny-tools-flag))
+          (excluded-flag (funcall get :excluded-tools-flag)))
+      (setq args
+            (append args
+                    (copilot-ide--tool-flag-args (funcall get :available-tools-flag)
+                                                 copilot-ide-mcp-available-tools)
+                    (copilot-ide--tool-flag-args (funcall get :allow-tools-flag)
+                                                 copilot-ide-mcp-allow-tools)
+                    ;; Claude uses one flag for excluded and denied tools.
+                    (if (equal deny-flag excluded-flag)
+                        (copilot-ide--tool-flag-args
+                         deny-flag (append copilot-ide-mcp-excluded-tools
+                                           copilot-ide-mcp-deny-tools))
+                      (append (copilot-ide--tool-flag-args excluded-flag
+                                                           copilot-ide-mcp-excluded-tools)
+                              (copilot-ide--tool-flag-args deny-flag
+                                                           copilot-ide-mcp-deny-tools))))))
     (when (copilot-ide-mcp-server-ensure-server)
       (when-let* ((config (copilot-ide-mcp-server-get-config session-id)))
-        (let ((json-str (json-encode config)))
-          (copilot-ide-debug "MCP config: %s" json-str)
-          ;; Escape for embedding inside a double-quoted shell argument (vterm uses sh -c)
-          (setq json-str (replace-regexp-in-string "\\\\" "\\\\\\\\" json-str))
-          (setq json-str (replace-regexp-in-string "\"" "\\\\\"" json-str))
-          (setq cmd (concat cmd " --additional-mcp-config \"" json-str "\"")))))
-    cmd))
+        (setq args (append args (list (concat (funcall get :mcp-config-flag) "="
+                                              (json-encode config)))))))
+    args))
 
-;;; Terminal Session Creation
+;;; Keybindings
 
-(defun copilot-ide--create-terminal-session (buffer-name working-dir session-id
-                                              &optional continue resume)
-  "Create a terminal buffer running Copilot in WORKING-DIR.
-CONTINUE and RESUME are passed to `copilot-ide--build-command'.
-Returns a cons cell (buffer . process) on success."
-  (copilot-ide--terminal-ensure-backend)
-  (let* ((cmd (copilot-ide--build-command session-id continue resume))
-         (default-directory working-dir)
-         (env-vars '("TERM_PROGRAM=emacs" "FORCE_CODE_TERMINAL=true")))
-    (copilot-ide-debug "Starting Copilot: %s" cmd)
-    (copilot-ide-debug "Working directory: %s" working-dir)
-    (copilot-ide-debug "Session ID: %s" session-id)
-    (cond
-     ((eq copilot-ide-terminal-backend 'vterm)
-      (let* ((vterm-buffer-name buffer-name)
-             (vterm-shell cmd)
-             (vterm-environment (append env-vars vterm-environment)))
-        (let ((buffer (save-window-excursion (vterm vterm-buffer-name))))
-          (unless buffer
-            (error "Failed to create vterm buffer"))
-          (with-current-buffer buffer
-            (copilot-ide--configure-vterm-buffer))
-          (let ((process (get-buffer-process buffer)))
-            (unless process (error "Failed to get vterm process"))
-            (cons buffer process)))))
+(defun copilot-ide--forward-c-underscore ()
+  "Send C-_ to the terminal in its input modes, else run the global binding.
+Global minor modes that bind C-_ (e.g. undo packages) would otherwise
+shadow ghostel's own forwarding, because `minor-mode-map-alist' takes
+precedence over ghostel's local keymap."
+  (interactive)
+  (if (memq ghostel--input-mode '(semi-char char))
+      (ghostel-send-string (string ?\C-_))
+    (when-let* ((binding (global-key-binding (kbd "C-_"))))
+      (call-interactively binding))))
 
-     ((eq copilot-ide-terminal-backend 'eat)
-      (let* ((buffer (get-buffer-create buffer-name))
-             (eat-term-name "xterm-256color")
-             (cmd-parts (copilot-ide--parse-command-string cmd))
-             (program (car cmd-parts))
-             (args (cdr cmd-parts)))
-        (with-current-buffer buffer
-          (unless (eq major-mode 'eat-mode) (eat-mode))
-          (when copilot-ide-eat-preserve-position
-            (setq-local eat--synchronize-scroll-function
-                        #'copilot-ide--terminal-position-keeper))
-          (setq-local process-environment
-                      (append env-vars process-environment))
-          (setq-local eat-kill-buffer-on-exit t)
-          (advice-add 'eat-emacs-mode :after
-                      #'copilot-ide--eat-emacs-mode-cursor-fix)
-          (dolist (fn '(eat-semi-char-mode eat-char-mode))
-            (advice-add fn :after
-                        #'copilot-ide--eat-terminal-mode-cursor-fix))
-          (eat-exec buffer buffer-name program nil args)
-          (let ((process (get-buffer-process buffer)))
-            (unless process (error "Failed to create eat process"))
-            (cons buffer process)))))
-
-     ((eq copilot-ide-terminal-backend 'ghostel)
-      (let* ((buffer (get-buffer-create buffer-name))
-             (cmd-parts (copilot-ide--parse-command-string cmd))
-             (program (car cmd-parts))
-             (args (cdr cmd-parts)))
-        (with-current-buffer buffer
-          ;; `ghostel-environment' is prepended to the spawned process's
-          ;; environment (earlier entries win), so this overrides ghostel's
-          ;; own TERM_PROGRAM default.
-          (setq-local ghostel-environment env-vars)
-          (setq-local ghostel-kill-buffer-on-exit t)
-          (ghostel-exec buffer program args)
-          (let ((process (get-buffer-process buffer)))
-            (unless process (error "Failed to create ghostel process"))
-            (cons buffer process)))))
-
-     (t (error "Unknown terminal backend: %s" copilot-ide-terminal-backend)))))
+(defun copilot-ide--setup-keybindings ()
+  "Install the session key overrides in the current buffer.
+ghostel replaces the local keymap whenever the input mode changes, and
+that keymap is shared by all ghostel buffers, so the overrides live in
+a buffer-local `minor-mode-overriding-map-alist' entry instead."
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "S-<return>") #'copilot-ide-insert-newline)
+    (define-key map (kbd "C-<escape>") #'copilot-ide-send-escape)
+    (define-key map (kbd "C-_") #'copilot-ide--forward-c-underscore)
+    (dolist (key copilot-ide-emacs-keybindings)
+      (when-let* ((binding (global-key-binding (kbd key))))
+        (define-key map (kbd key) binding)))
+    (setq-local copilot-ide--keybinding-override t)
+    (setq-local minor-mode-overriding-map-alist
+                (cons (cons 'copilot-ide--keybinding-override map)
+                      (assq-delete-all 'copilot-ide--keybinding-override
+                                       (copy-sequence minor-mode-overriding-map-alist))))))
 
 ;;; Session Start/Stop
 
-(defun copilot-ide--toggle-existing-window (existing-buffer working-dir)
-  "Toggle visibility of EXISTING-BUFFER for the session in WORKING-DIR."
-  (let ((window (get-buffer-window existing-buffer)))
-    (if window
-        (progn
-          (setq copilot-ide--last-accessed-buffer existing-buffer)
-          (delete-window window)
-          (copilot-ide-debug "Copilot window hidden"))
-      (copilot-ide--display-buffer-in-side-window existing-buffer)
-      (copilot-ide-debug "Copilot window shown"))))
+(defun copilot-ide--unique-buffer-name (name)
+  "Return NAME, or a variant of it when a live buffer already uses it."
+  (if (get-buffer name) (generate-new-buffer-name name) name))
+
+(defun copilot-ide--end-session (session)
+  "Forget SESSION and release its resources.  Does not kill its buffer."
+  (let ((directory (copilot-ide--session-directory session)))
+    (when (eq (gethash directory copilot-ide--sessions) session)
+      (remhash directory copilot-ide--sessions)
+      (copilot-ide-mcp-server-session-ended (copilot-ide--session-id session))
+      (when (zerop (hash-table-count copilot-ide--sessions))
+        (remove-hook 'post-command-hook #'copilot-ide--track-active-buffer))
+      (copilot-ide-debug "Session ended: %s" (copilot-ide--session-label session)))))
 
 (defun copilot-ide--start-session (&optional continue resume)
-  "Start a Copilot CLI session for the current project.
-If a session is already running, toggle its window visibility instead.
-CONTINUE, if non-nil, passes --continue to resume the most recent session.
-RESUME, if non-nil, passes --resume (with optional session-id string)."
-  (unless (copilot-ide--ensure-cli)
-    (user-error "Copilot CLI not available.  Install it and ensure it is in PATH"))
-  (copilot-ide--cleanup-dead-processes)
-  (let* ((working-dir (copilot-ide--get-working-directory))
-         (buffer-name (copilot-ide--get-buffer-name))
-         (existing-buffer (get-buffer buffer-name))
-         (existing-process (copilot-ide--get-process working-dir)))
-    (if (and existing-buffer (buffer-live-p existing-buffer) existing-process)
-        (copilot-ide--toggle-existing-window existing-buffer working-dir)
-      (copilot-ide--terminal-ensure-backend)
-      (let ((session-id (format "copilot-%s-%s"
-                                (file-name-nondirectory (directory-file-name working-dir))
-                                (format-time-string "%Y%m%d-%H%M%S"))))
-        (condition-case err
-            (let* ((result (copilot-ide--create-terminal-session
-                            buffer-name working-dir session-id continue resume))
-                   (buffer (car result))
-                   (process (cdr result)))
-              ;; Register the session
-              (copilot-ide-mcp-server-session-started session-id working-dir buffer)
-              (copilot-ide--set-process process working-dir)
-              (puthash working-dir session-id copilot-ide--session-ids)
-              ;; Enable active-buffer tracking
-              (add-hook 'post-command-hook #'copilot-ide--track-active-buffer)
-              ;; Sentinel: clean up when Copilot exits
-              (set-process-sentinel
-               process
-               (lambda (_proc event)
-                 (when (string-match-p "\\(finished\\|exited\\|killed\\|terminated\\)" event)
-                   (copilot-ide--cleanup-on-exit working-dir))))
-              (with-current-buffer buffer
-                (add-hook 'kill-buffer-hook
-                          (lambda () (copilot-ide--cleanup-on-exit working-dir))
-                          nil t)
-                (copilot-ide--setup-terminal-keybindings)
-                (when (and copilot-ide-show-modeline
-                           (bound-and-true-p hide-mode-line-mode))
-                  (hide-mode-line-mode -1))
-                (cond
-                 ((eq copilot-ide-terminal-backend 'vterm)
-                  (add-hook 'vterm-exit-functions
-                            (lambda (&rest _)
-                              (when (buffer-live-p buffer) (kill-buffer buffer)))
-                            nil t))
-                 ((eq copilot-ide-terminal-backend 'eat) nil)
-                 ((eq copilot-ide-terminal-backend 'ghostel) nil)))
-              (sleep-for copilot-ide-terminal-initialization-delay)
-              (copilot-ide--display-buffer-in-side-window buffer)
-              (copilot-ide-log "Copilot started in %s%s"
-                               (file-name-nondirectory (directory-file-name working-dir))
-                               (if (copilot-ide-mcp-server-get-port)
-                                   (format " with MCP tools on port %d"
-                                           (copilot-ide-mcp-server-get-port))
-                                 "")))
-          (error
-           (signal (car err) (cdr err))))))))
+  "Start an agent session for the current project, or toggle its window.
+CONTINUE and RESUME are passed to `copilot-ide--build-args'."
+  (let* ((directory (copilot-ide--get-working-directory))
+         (existing (copilot-ide--session-for-directory directory)))
+    (if existing
+        (progn
+          (when (or continue resume)
+            (message "A session is already running in %s" (abbreviate-file-name directory)))
+          (copilot-ide--toggle-buffer (copilot-ide--session-buffer existing)))
+      (copilot-ide--create-session copilot-ide-agent directory continue resume))))
+
+(defun copilot-ide--create-session (agent directory &optional continue resume)
+  "Start AGENT in DIRECTORY and return the new session.
+CONTINUE and RESUME are passed to `copilot-ide--build-args'."
+  (unless (require 'ghostel nil t)
+    (user-error "The ghostel package is required"))
+  (unless (copilot-ide--cli-available-p agent)
+    (user-error "%s CLI `%s' not found.  Install it or set `copilot-ide-cli-path'"
+                (copilot-ide--agent-name agent) (copilot-ide--program agent)))
+  (let* ((session-id (copilot-ide-mcp-server-new-session-id))
+         (buffer (get-buffer-create
+                  (copilot-ide--unique-buffer-name
+                   (funcall copilot-ide-buffer-name-function directory agent))))
+         (session (copilot-ide--session-create
+                   :agent agent :directory directory :buffer buffer :id session-id))
+         (program (copilot-ide--program agent)))
+    (condition-case err
+        (let ((args (copilot-ide--build-args agent session-id continue resume)))
+          (copilot-ide-debug "Starting %s %S in %s" program args directory)
+          ;; Register before the agent runs: it connects to the MCP
+          ;; server right away.
+          (copilot-ide-mcp-server-session-started session-id directory buffer)
+          (puthash directory session copilot-ide--sessions)
+          (with-current-buffer buffer
+            (setq default-directory directory))
+          ;; Display first, so ghostel sizes the terminal to the window
+          ;; and the agent does not get a resize right after starting.
+          (copilot-ide--display-buffer buffer)
+          (setf (copilot-ide--session-process session)
+                ;; `ghostel-exec' enables `ghostel-mode', which kills
+                ;; local variables, so the environment is bound
+                ;; dynamically and the buffer setup follows the call.
+                (let ((ghostel-environment (append copilot-ide-environment
+                                                   ghostel-environment)))
+                  (ghostel-exec buffer program args)))
+          (with-current-buffer buffer
+            (setq copilot-ide--buffer-session session)
+            (setq-local ghostel-kill-buffer-on-exit t)
+            (add-hook 'ghostel-exit-functions
+                      (lambda (&rest _) (copilot-ide--end-session session))
+                      nil t)
+            (add-hook 'kill-buffer-hook
+                      (lambda () (copilot-ide--end-session session))
+                      nil t)
+            (copilot-ide--setup-keybindings)
+            (when (and copilot-ide-show-modeline
+                       (bound-and-true-p hide-mode-line-mode))
+              (hide-mode-line-mode -1)))
+          (add-hook 'post-command-hook #'copilot-ide--track-active-buffer)
+          (copilot-ide-log "%s started%s" (copilot-ide--session-label session)
+                           (if-let* ((port (copilot-ide-mcp-server-get-port)))
+                               (format " with MCP tools on port %d" port)
+                             ""))
+          session)
+      (error
+       (copilot-ide--end-session session)
+       (when (buffer-live-p buffer)
+         (let ((kill-buffer-query-functions nil))
+           (kill-buffer buffer)))
+       (signal (car err) (cdr err))))))
+
+(defun copilot-ide--cleanup-all-sessions ()
+  "Stop all sessions (run from `kill-emacs-hook')."
+  (dolist (session (copilot-ide--live-sessions))
+    (copilot-ide--end-session session)))
+
+(add-hook 'kill-emacs-hook #'copilot-ide--cleanup-all-sessions)
 
 ;;; Interactive Commands
 
 ;;;###autoload
 (defun copilot-ide ()
-  "Start GitHub Copilot CLI for the current project in a side window.
-If a session is already running, toggle the window instead."
+  "Start the agent for the current project, or toggle its window.
+The agent is `copilot-ide-agent'."
   (interactive)
   (copilot-ide--start-session))
 
 ;;;###autoload
+(defun copilot-ide-start-agent (agent)
+  "Start AGENT for the current project, regardless of `copilot-ide-agent'.
+Interactively, read AGENT from the minibuffer."
+  (interactive
+   (list (intern (completing-read "Agent: "
+                                  (mapcar (lambda (a) (symbol-name (car a)))
+                                          copilot-ide-agents)
+                                  nil t))))
+  (let ((copilot-ide-agent agent))
+    (copilot-ide--start-session)))
+
+;;;###autoload
 (defun copilot-ide-continue ()
-  "Continue the most recent Copilot session for the current project.
-Starts Copilot with --continue to resume the last conversation."
+  "Start the agent with --continue to resume the project's last conversation."
   (interactive)
   (copilot-ide--start-session t nil))
 
 ;;;###autoload
 (defun copilot-ide-resume (&optional session-id)
-  "Resume a previous Copilot session, optionally specifying SESSION-ID.
-With a prefix argument, prompts for a session ID.
-Without a session ID, Copilot presents a session picker."
+  "Start the agent with --resume, optionally for SESSION-ID.
+With a prefix argument, prompt for the session ID.  Without one,
+the agent shows its session picker."
   (interactive
    (list (when current-prefix-arg
            (read-string "Session ID (leave empty for picker): "))))
@@ -956,126 +578,116 @@ Without a session ID, Copilot presents a session picker."
 
 ;;;###autoload
 (defun copilot-ide-stop ()
-  "Stop the Copilot CLI session for the current project."
+  "Stop the agent session for the current buffer or project."
   (interactive)
-  (let ((buffer-name (copilot-ide--get-buffer-name))
-        (working-dir (copilot-ide--get-working-directory)))
-    (if-let* ((buffer (get-buffer buffer-name)))
-        (progn
-          (kill-buffer buffer)
-          (copilot-ide-log "Stopping Copilot in %s..."
-                           (file-name-nondirectory (directory-file-name working-dir))))
-      (copilot-ide-log "No Copilot session is running in this directory"))))
+  (if-let* ((session (copilot-ide--current-session)))
+      (let ((label (copilot-ide--session-label session)))
+        (let ((kill-buffer-query-functions nil))
+          (kill-buffer (copilot-ide--session-buffer session)))
+        (copilot-ide-log "Stopped %s" label))
+    (copilot-ide-log "No agent session is running for this project")))
 
 ;;;###autoload
 (defun copilot-ide-check-status ()
-  "Check GitHub Copilot CLI availability and version."
+  "Show whether the agent CLI is installed, and its version."
   (interactive)
-  (copilot-ide--detect-cli)
-  (if copilot-ide--cli-available
-      (let ((version (with-temp-buffer
-                       (call-process copilot-ide-cli-path nil t nil "--version")
-                       (string-trim (buffer-string)))))
-        (copilot-ide-log "Copilot CLI version: %s" version))
-    (copilot-ide-log "Copilot CLI is not installed or not in PATH.")))
+  (let ((program (copilot-ide--program)))
+    (if (copilot-ide--cli-available-p)
+        (copilot-ide-log "%s CLI version: %s" (copilot-ide--agent-name)
+                         (with-temp-buffer
+                           (call-process program nil t nil "--version")
+                           (string-trim (buffer-string))))
+      (copilot-ide-log "%s CLI `%s' is not installed or not in PATH"
+                       (copilot-ide--agent-name) program))))
 
 ;;;###autoload
 (defun copilot-ide-switch-to-buffer ()
-  "Switch focus to the Copilot buffer for the current project."
+  "Select the session window for the current project, displaying it if needed."
   (interactive)
-  (let ((buffer-name (copilot-ide--get-buffer-name)))
-    (if-let* ((buffer (get-buffer buffer-name)))
-        (if-let* ((window (get-buffer-window buffer)))
-            (select-window window)
-          (copilot-ide--display-buffer-in-side-window buffer))
-      (user-error "No Copilot session for this project.  Use M-x copilot-ide to start one"))))
+  (let ((buffer (copilot-ide--session-buffer (copilot-ide--require-session))))
+    (if-let* ((window (get-buffer-window buffer)))
+        (select-window window)
+      (let ((copilot-ide-focus-on-open t))
+        (copilot-ide--display-buffer buffer)))))
 
 ;;;###autoload
 (defun copilot-ide-list-sessions ()
-  "List active Copilot sessions and switch to the selected one."
+  "Pick one of the running sessions and display it."
   (interactive)
-  (copilot-ide--cleanup-dead-processes)
-  (let ((sessions '()))
-    (maphash (lambda (directory _)
-               (push (cons (abbreviate-file-name directory) directory) sessions))
-             copilot-ide--processes)
-    (if sessions
-        (let ((choice (completing-read "Switch to Copilot session: " sessions nil t)))
-          (when choice
-            (let* ((directory (alist-get choice sessions nil nil #'string=))
-                   (buffer-name (funcall copilot-ide-buffer-name-function directory)))
-              (if-let* ((buffer (get-buffer buffer-name)))
-                  (copilot-ide--display-buffer-in-side-window buffer)
-                (user-error "Buffer for session %s no longer exists" choice)))))
-      (copilot-ide-log "No active Copilot sessions"))))
+  (let ((sessions (mapcar (lambda (s)
+                            (cons (format "%s  (%s)"
+                                          (abbreviate-file-name
+                                           (copilot-ide--session-directory s))
+                                          (copilot-ide--agent-name
+                                           (copilot-ide--session-agent s)))
+                                  s))
+                          (copilot-ide--live-sessions))))
+    (if (null sessions)
+        (copilot-ide-log "No active agent sessions")
+      (let ((choice (completing-read "Switch to session: " sessions nil t)))
+        (copilot-ide--display-buffer
+         (copilot-ide--session-buffer (cdr (assoc choice sessions))))))))
+
+(defun copilot-ide--send (function &rest args)
+  "Call FUNCTION with ARGS in the buffer of the current session."
+  (with-current-buffer (copilot-ide--session-buffer (copilot-ide--require-session))
+    (apply function args)))
 
 ;;;###autoload
 (defun copilot-ide-send-escape ()
-  "Send the escape key to the Copilot terminal for the current project."
+  "Send the escape key to the agent of the current buffer or project."
   (interactive)
-  (let ((buffer-name (copilot-ide--get-buffer-name)))
-    (if-let* ((buffer (get-buffer buffer-name)))
-        (with-current-buffer buffer (copilot-ide--terminal-send-escape))
-      (user-error "No Copilot session for this project"))))
+  (copilot-ide--send #'ghostel-send-string "\e"))
 
 ;;;###autoload
 (defun copilot-ide-insert-newline ()
-  "Insert a newline into the Copilot prompt (backslash + return)."
+  "Insert a newline into the agent prompt (backslash + return)."
   (interactive)
-  (let ((buffer-name (copilot-ide--get-buffer-name)))
-    (if-let* ((buffer (get-buffer buffer-name)))
-        (with-current-buffer buffer
-          (copilot-ide--terminal-send-string "\\")
-          (sit-for 0.1)
-          (copilot-ide--terminal-send-return))
-      (user-error "No Copilot session for this project"))))
+  (copilot-ide--send
+   (lambda ()
+     (ghostel-send-string "\\")
+     (sit-for 0.1)
+     (ghostel-send-string "\r"))))
 
 ;;;###autoload
 (defun copilot-ide-send-prompt (&optional prompt)
-  "Send PROMPT (or read one interactively) to the Copilot terminal."
+  "Send PROMPT (or one read from the minibuffer) to the agent and submit it.
+The text is sent as a bracketed paste, so line breaks stay in the
+prompt instead of submitting it early."
   (interactive)
-  (let ((buffer-name (copilot-ide--get-buffer-name)))
-    (if-let* ((buffer (get-buffer buffer-name)))
-        (let ((text (or prompt (read-string "Copilot prompt: "))))
-          (unless (string-empty-p text)
-            (with-current-buffer buffer
-              (copilot-ide--terminal-send-string text)
-              (sit-for 0.1)
-              (copilot-ide--terminal-send-return))))
-      (user-error "No Copilot session for this project"))))
+  (let ((session (copilot-ide--require-session)))
+    (let ((text (or prompt (read-string (format "%s prompt: "
+                                                (copilot-ide--agent-name
+                                                 (copilot-ide--session-agent session)))))))
+      (unless (string-empty-p text)
+        (with-current-buffer (copilot-ide--session-buffer session)
+          (ghostel-paste-string text)
+          (sit-for 0.1)
+          (ghostel-send-string "\r"))))))
 
 ;;;###autoload
 (defun copilot-ide-toggle ()
-  "Toggle visibility of the Copilot window for the current project."
+  "Toggle the session window of the current project."
   (interactive)
-  (let* ((working-dir (copilot-ide--get-working-directory))
-         (buffer (get-buffer (copilot-ide--get-buffer-name))))
-    (if buffer
-        (copilot-ide--toggle-existing-window buffer working-dir)
-      (user-error "No Copilot session for this project"))))
+  (copilot-ide--toggle-buffer (copilot-ide--session-buffer (copilot-ide--require-session))))
 
 ;;;###autoload
 (defun copilot-ide-toggle-recent ()
-  "Toggle the most recently accessed Copilot window.
-Closes all visible Copilot windows, or re-opens the most recent one."
+  "Hide all visible session windows, or show the most recent session again."
   (interactive)
-  (let ((found-visible nil))
-    (maphash (lambda (directory _process)
-               (let* ((buffer-name (funcall copilot-ide-buffer-name-function directory))
-                      (buffer (get-buffer buffer-name)))
-                 (when (and buffer (buffer-live-p buffer) (get-buffer-window buffer))
-                   (copilot-ide--toggle-existing-window buffer directory)
-                   (setq found-visible t))))
-             copilot-ide--processes)
+  (let ((visible (cl-remove-if-not
+                  (lambda (s) (get-buffer-window (copilot-ide--session-buffer s)))
+                  (copilot-ide--live-sessions))))
     (cond
-     (found-visible
-      (message "Closed all Copilot windows"))
+     (visible
+      (dolist (session visible)
+        (copilot-ide--hide-buffer (copilot-ide--session-buffer session)))
+      (message "Closed all agent windows"))
      ((and copilot-ide--last-accessed-buffer
            (buffer-live-p copilot-ide--last-accessed-buffer))
-      (copilot-ide--display-buffer-in-side-window copilot-ide--last-accessed-buffer)
-      (message "Opened most recent Copilot session"))
+      (copilot-ide--display-buffer copilot-ide--last-accessed-buffer))
      (t
-      (user-error "No recent Copilot session to toggle")))))
+      (user-error "No recent agent session to toggle")))))
 
 (provide 'copilot-ide)
 
