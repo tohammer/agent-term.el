@@ -1,4 +1,4 @@
-;;; copilot-ide-debug.el --- Debug logging for copilot-ide  -*- lexical-binding: t; -*-
+;;; agent-term-debug.el --- Debug logging for agent-term  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025 Tobias Hammer
 ;; Copyright (C) 2025 Yoav Orot
@@ -26,7 +26,7 @@
 
 ;;; Commentary:
 
-;; Debug logging functionality for copilot-ide.el.
+;; Debug logging functionality for agent-term.el.
 
 ;;; Code:
 
@@ -34,26 +34,26 @@
 
 ;;; Customization
 
-(defcustom copilot-ide-debug nil
+(defcustom agent-term-debug nil
   "When non-nil, enable debug logging."
   :type 'boolean
-  :group 'copilot-ide)
+  :group 'agent-term)
 
-(defcustom copilot-ide-log-with-context t
+(defcustom agent-term-log-with-context t
   "When non-nil, include project context in log messages."
   :type 'boolean
-  :group 'copilot-ide)
+  :group 'agent-term)
 
-(defcustom copilot-ide-debug-buffer "*copilot-ide-debug*"
+(defcustom agent-term-debug-buffer "*agent-term-debug*"
   "Buffer name for debug output."
   :type 'string
-  :group 'copilot-ide)
+  :group 'agent-term)
 
 ;;; Debug Functions
 
-(defun copilot-ide--get-session-context ()
+(defun agent-term--get-session-context ()
   "Get current session context for logging."
-  (if copilot-ide-log-with-context
+  (if agent-term-log-with-context
       (format "[%s]" (or (ignore-errors
                            (file-name-nondirectory
                             (directory-file-name
@@ -61,35 +61,35 @@
                          "no-project"))
     ""))
 
-(defmacro copilot-ide-debug (format-string &rest args)
+(defmacro agent-term-debug (format-string &rest args)
   "Log debug message with FORMAT-STRING and ARGS if debug is enabled."
-  `(when copilot-ide-debug
+  `(when agent-term-debug
      (let ((message (format ,format-string ,@args))
            (timestamp (format-time-string "%Y-%m-%d %H:%M:%S"))
-           (context (copilot-ide--get-session-context)))
-       (with-current-buffer (get-buffer-create copilot-ide-debug-buffer)
+           (context (agent-term--get-session-context)))
+       (with-current-buffer (get-buffer-create agent-term-debug-buffer)
          (goto-char (point-max))
          (insert (format "%s %s%s\n" timestamp context message))))))
 
-(defun copilot-ide-log (format-string &rest args)
+(defun agent-term-log (format-string &rest args)
   "Log message with FORMAT-STRING and ARGS."
   (let ((message (apply #'format format-string args)))
-    (message "%s %s" (copilot-ide--get-session-context) message)))
+    (message "%s %s" (agent-term--get-session-context) message)))
 
 ;;;###autoload
-(defun copilot-ide-show-debug ()
+(defun agent-term-show-debug ()
   "Show the debug buffer."
   (interactive)
-  (display-buffer (get-buffer-create copilot-ide-debug-buffer)))
+  (display-buffer (get-buffer-create agent-term-debug-buffer)))
 
 ;;;###autoload
-(defun copilot-ide-clear-debug ()
+(defun agent-term-clear-debug ()
   "Clear the debug buffer."
   (interactive)
-  (with-current-buffer (get-buffer-create copilot-ide-debug-buffer)
+  (with-current-buffer (get-buffer-create agent-term-debug-buffer)
     (erase-buffer)
     (message "Debug buffer cleared")))
 
-(provide 'copilot-ide-debug)
+(provide 'agent-term-debug)
 
-;;; copilot-ide-debug.el ends here
+;;; agent-term-debug.el ends here

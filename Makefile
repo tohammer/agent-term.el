@@ -3,7 +3,7 @@ EMACS ?= emacs
 # ghostel), e.g. LOAD_PATH="-L ~/.emacs.d/elpa/transient-0.9.0 ...".
 LOAD_PATH ?=
 BATCH = $(EMACS) -Q --batch -L . $(LOAD_PATH) --eval '(setq load-prefer-newer t)'
-FILES = $(wildcard copilot-ide*.el)
+FILES = $(wildcard agent-term*.el)
 
 .PHONY: all compile checkdoc test clean
 
@@ -17,7 +17,7 @@ checkdoc:
 	$(BATCH) --eval '(dolist (f (quote ($(patsubst %,"%",$(FILES))))) (checkdoc-file f))'
 
 test:
-	$(BATCH) -L test -l test/copilot-ide-test.el -f ert-run-tests-batch-and-exit
+	$(BATCH) -L test -l test/agent-term-test.el -f ert-run-tests-batch-and-exit
 
 clean:
 	rm -f *.elc test/*.elc

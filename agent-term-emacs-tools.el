@@ -1,4 +1,4 @@
-;;; copilot-ide-emacs-tools.el --- Emacs MCP tools for AI coding agents  -*- lexical-binding: t; -*-
+;;; agent-term-emacs-tools.el --- Emacs MCP tools for AI coding agents  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025 Tobias Hammer
 ;; Copyright (C) 2025 Yoav Orot
@@ -29,12 +29,12 @@
 ;; Emacs-specific MCP tools for the agent.  Exposes xref, imenu,
 ;; tree-sitter, and project information through the HTTP MCP server.
 ;;
-;; Call `copilot-ide-emacs-tools-setup' in your init file to enable all tools.
+;; Call `agent-term-emacs-tools-setup' in your init file to enable all tools.
 
 ;;; Code:
 
-(require 'copilot-ide-mcp-server)
-(require 'copilot-ide-diagnostics)
+(require 'agent-term-mcp-server)
+(require 'agent-term-diagnostics)
 (require 'xref)
 (require 'project)
 (require 'cl-lib)
@@ -49,26 +49,26 @@
 
 ;;; Tool Functions
 
-(defun copilot-ide-mcp--lsp-connected-p ()
+(defun agent-term-mcp--lsp-connected-p ()
   "Return non-nil if the current buffer has an active LSP connection.
 Checks for eglot and lsp-mode."
   (or (and (fboundp 'eglot-current-server) (eglot-current-server))
       (and (fboundp 'lsp-workspaces) (lsp-workspaces))))
 
-(defconst copilot-ide-mcp--grep-max-results 200
+(defconst agent-term-mcp--grep-max-results 200
   "Maximum number of lines returned by the grep fallback.")
 
-(defun copilot-ide-mcp--ere-quote (string)
+(defun agent-term-mcp--ere-quote (string)
   "Quote STRING for use in a POSIX extended regexp."
   (replace-regexp-in-string "[][(){}.*+?^$|\\\\]" "\\\\\\&" string))
 
-(defun copilot-ide-mcp--grep-symbol-in-project (identifier project-dir &optional definitions-only)
+(defun agent-term-mcp--grep-symbol-in-project (identifier project-dir &optional definitions-only)
   "Search for IDENTIFIER across all files in PROJECT-DIR using rg or grep.
 When DEFINITIONS-ONLY is non-nil, restrict to likely definitions: a
 definition keyword followed by IDENTIFIER, or IDENTIFIER at the start
 of a line followed by =, : or (.
 Returns a list of \"file:line: text\" strings, or nil."
-  (let* ((id (copilot-ide-mcp--ere-quote (format "%s" identifier)))
+  (let* ((id (agent-term-mcp--ere-quote (format "%s" identifier)))
          (pattern
           (if definitions-only
               (format (concat "\\b(def|class|const|let|var|function|func|fn|"
@@ -86,15 +86,15 @@ Returns a list of \"file:line: text\" strings, or nil."
         (let ((lines (with-temp-buffer
                        (apply #'process-file (car cmd) nil t nil (cdr cmd))
                        (split-string (buffer-string) "\n" t))))
-          (if (> (length lines) copilot-ide-mcp--grep-max-results)
-              (append (seq-take lines copilot-ide-mcp--grep-max-results)
+          (if (> (length lines) agent-term-mcp--grep-max-results)
+              (append (seq-take lines agent-term-mcp--grep-max-results)
                       (list (format "... %d more matches"
-                                    (- (length lines) copilot-ide-mcp--grep-max-results))))
+                                    (- (length lines) agent-term-mcp--grep-max-results))))
             lines))
       (error
        (list (format "grep failed: %s" (error-message-string err)))))))
 
-(defun copilot-ide-mcp--xref-items-to-strings (xref-items)
+(defun agent-term-mcp--xref-items-to-strings (xref-items)
   "Format a list of XREF-ITEMS as \"file:line: summary\" strings.
 Uses the line stored in the location where possible, so files of
 the results are not visited just to compute it."
@@ -109,15 +109,15 @@ the results are not visited just to compute it."
                       (xref-item-summary item))))
           xref-items))
 
-(defun copilot-ide-mcp--get-xref-buffer (file-path)
+(defun agent-term-mcp--get-xref-buffer (file-path)
   "Return the best buffer to use as context for xref operations on FILE-PATH.
 Prefers an already-open buffer visiting FILE-PATH (which will have LSP active).
 Only opens FILE-PATH as a last resort (which may lack an LSP connection)."
-  (let ((file (copilot-ide-mcp-server-expand-file-name file-path)))
+  (let ((file (agent-term-mcp-server-expand-file-name file-path)))
     (or (find-buffer-visiting file)
         (find-file-noselect file))))
 
-(defun copilot-ide-mcp--call-xref-at-identifier (identifier fn)
+(defun agent-term-mcp--call-xref-at-identifier (identifier fn)
   "Position point at IDENTIFIER in the current buffer, then call FN.
 FN is called with no arguments while point is at the start of the first
 occurrence of IDENTIFIER.  Uses symbol-boundary search so partial matches
@@ -134,44 +134,44 @@ Returns whatever FN returns."
       (when found (goto-char (match-beginning 0)))
       (funcall fn))))
 
-(defun copilot-ide-mcp-xref-find-references (identifier file-path)
+(defun agent-term-mcp-xref-find-references (identifier file-path)
   "Find references to IDENTIFIER using the xref backend for FILE-PATH.
 Positions point at IDENTIFIER in the buffer before querying LSP, since
 LSP backends (eglot, lsp-mode) use the cursor position for the request.
 Falls back to a grep-based project search when LSP is not connected."
   (if (not file-path)
       (error "The file_path parameter is required")
-    (copilot-ide-mcp-server-with-session-context nil
-      (let ((target-buffer (copilot-ide-mcp--get-xref-buffer file-path))
+    (agent-term-mcp-server-with-session-context nil
+      (let ((target-buffer (agent-term-mcp--get-xref-buffer file-path))
             (identifier-str (format "%s" identifier)))
         (with-current-buffer target-buffer
-          (if (and (xref-find-backend) (copilot-ide-mcp--lsp-connected-p))
+          (if (and (xref-find-backend) (agent-term-mcp--lsp-connected-p))
               (condition-case _err
                   (let ((xref-items
-                         (copilot-ide-mcp--call-xref-at-identifier
+                         (agent-term-mcp--call-xref-at-identifier
                           identifier-str
                           (lambda () (xref-backend-references
                                       (xref-find-backend) identifier-str)))))
                     (if xref-items
-                        (copilot-ide-mcp--xref-items-to-strings xref-items)
+                        (agent-term-mcp--xref-items-to-strings xref-items)
                       (format "No references found for '%s'" identifier-str)))
                 (error
                  ;; LSP connected but request failed — fall through to grep
-                 (copilot-ide-mcp--grep-symbol-in-project
-                  identifier-str (or (plist-get (copilot-ide-mcp-server-get-session-context) :project-dir)
+                 (agent-term-mcp--grep-symbol-in-project
+                  identifier-str (or (plist-get (agent-term-mcp-server-get-session-context) :project-dir)
                                      default-directory))))
             ;; No LSP — use grep
-            (let ((results (copilot-ide-mcp--grep-symbol-in-project
-                            identifier-str (or (plist-get (copilot-ide-mcp-server-get-session-context) :project-dir)
+            (let ((results (agent-term-mcp--grep-symbol-in-project
+                            identifier-str (or (plist-get (agent-term-mcp-server-get-session-context) :project-dir)
                                                default-directory))))
               (or results (format "No references found for '%s'" identifier-str)))))))))
 
-(defun copilot-ide-mcp-xref-find-apropos (pattern file-path)
+(defun agent-term-mcp-xref-find-apropos (pattern file-path)
   "Find symbols matching PATTERN using the xref backend for FILE-PATH."
   (if (not file-path)
       (error "The file_path parameter is required")
-    (copilot-ide-mcp-server-with-session-context nil
-      (let ((target-buffer (copilot-ide-mcp--get-xref-buffer file-path))
+    (agent-term-mcp-server-with-session-context nil
+      (let ((target-buffer (agent-term-mcp--get-xref-buffer file-path))
             (pattern-str (format "%s" pattern)))
         (with-current-buffer target-buffer
           (condition-case err
@@ -188,15 +188,15 @@ Falls back to a grep-based project search when LSP is not connected."
                  (t
                   (let ((xref-items (xref-backend-apropos backend pattern-str)))
                     (if xref-items
-                        (copilot-ide-mcp--xref-items-to-strings xref-items)
+                        (agent-term-mcp--xref-items-to-strings xref-items)
                       (format "No symbols found matching '%s'" pattern-str))))))
             (error
              (format "Error searching for '%s' in %s: %s"
                      pattern-str file-path (error-message-string err)))))))))
 
-(defun copilot-ide-mcp-project-info ()
+(defun agent-term-mcp-project-info ()
   "Return a summary of the current session's project."
-  (let ((context (copilot-ide-mcp-server-get-session-context)))
+  (let ((context (agent-term-mcp-server-get-session-context)))
     (if context
         (let ((project-dir (plist-get context :project-dir))
               (buffer (plist-get context :buffer)))
@@ -210,13 +210,13 @@ Falls back to a grep-based project search when LSP is not connected."
                     0)))
       "No session context available")))
 
-(defun copilot-ide-mcp-imenu-list-symbols (file-path)
+(defun agent-term-mcp-imenu-list-symbols (file-path)
   "List symbols in FILE-PATH using imenu."
   (if (not file-path)
       (error "The file_path parameter is required")
-    (copilot-ide-mcp-server-with-session-context nil
+    (agent-term-mcp-server-with-session-context nil
       (condition-case err
-          (let ((target-buffer (copilot-ide-mcp--get-xref-buffer file-path)))
+          (let ((target-buffer (agent-term-mcp--get-xref-buffer file-path)))
             (with-current-buffer target-buffer
               (imenu--make-index-alist)
               (if imenu--index-alist
@@ -256,7 +256,7 @@ Falls back to a grep-based project search when LSP is not connected."
         (error (format "Error listing symbols in %s: %s"
                        file-path (error-message-string err)))))))
 
-(defun copilot-ide-mcp-treesit--format-tree (node level max-depth)
+(defun agent-term-mcp-treesit--format-tree (node level max-depth)
   "Format NODE at depth LEVEL as an indented tree string up to MAX-DEPTH."
   (if (or (not node) (>= level max-depth))
       ""
@@ -276,11 +276,11 @@ Falls back to a grep-based project search when LSP is not connected."
       (dotimes (i child-count)
         (when-let* ((child (treesit-node-child node i)))
           (setq result (concat result
-                               (copilot-ide-mcp-treesit--format-tree
+                               (agent-term-mcp-treesit--format-tree
                                 child (1+ level) max-depth)))))
       result)))
 
-(defun copilot-ide-mcp--line-column-to-point (line column)
+(defun agent-term-mcp--line-column-to-point (line column)
   "Convert 1-based LINE and 0-based COLUMN to a buffer position."
   (save-excursion
     (goto-char (point-min))
@@ -288,7 +288,7 @@ Falls back to a grep-based project search when LSP is not connected."
     (move-to-column column)
     (point)))
 
-(defun copilot-ide-mcp-treesit-info (file-path &optional line column whole_file
+(defun agent-term-mcp-treesit-info (file-path &optional line column whole_file
                                                include_ancestors include_children)
   "Get tree-sitter information for FILE-PATH.
 LINE (1-based) and COLUMN (0-based) specify a position.
@@ -296,11 +296,11 @@ WHOLE_FILE shows the full syntax tree.
 INCLUDE_ANCESTORS and INCLUDE_CHILDREN expand the output."
   (if (not file-path)
       (error "The file_path parameter is required")
-    (copilot-ide-mcp-server-with-session-context nil
+    (agent-term-mcp-server-with-session-context nil
       (condition-case err
           (if (not (treesit-available-p))
               "Tree-sitter is not available in this Emacs build"
-            (let ((target-buffer (copilot-ide-mcp--get-xref-buffer file-path)))
+            (let ((target-buffer (agent-term-mcp--get-xref-buffer file-path)))
               (with-current-buffer target-buffer
                 (let* ((parsers (treesit-parser-list))
                        (parser (car parsers)))
@@ -308,7 +308,7 @@ INCLUDE_ANCESTORS and INCLUDE_CHILDREN expand the output."
                       (format "No tree-sitter parser available for %s" file-path)
                     (let* ((root-node (treesit-parser-root-node parser))
                            (pos (cond (whole_file nil)
-                                      (line (copilot-ide-mcp--line-column-to-point
+                                      (line (agent-term-mcp--line-column-to-point
                                              line (or column 0)))
                                       (t (point))))
                            (node (if whole_file root-node
@@ -317,7 +317,7 @@ INCLUDE_ANCESTORS and INCLUDE_CHILDREN expand the output."
                       (if (not node)
                           "No tree-sitter node found"
                         (if whole_file
-                            (copilot-ide-mcp-treesit--format-tree root-node 0 20)
+                            (agent-term-mcp-treesit--format-tree root-node 0 20)
                           (push (format "Node Type: %s" (treesit-node-type node)) results)
                           (push (format "Range: %d-%d"
                                         (treesit-node-start node)
@@ -368,62 +368,62 @@ INCLUDE_ANCESTORS and INCLUDE_CHILDREN expand the output."
 
 ;;; Additional Tool Functions
 
-(defun copilot-ide-mcp-xref-find-definitions (identifier file-path)
+(defun agent-term-mcp-xref-find-definitions (identifier file-path)
   "Find definitions of IDENTIFIER using the xref backend for FILE-PATH.
 Positions point at IDENTIFIER in the buffer before querying LSP, since
 LSP backends (eglot, lsp-mode) use the cursor position for the request.
 Falls back to a grep-based project search when LSP is not connected."
   (if (not file-path)
       (error "The file_path parameter is required")
-    (copilot-ide-mcp-server-with-session-context nil
-      (let ((target-buffer (copilot-ide-mcp--get-xref-buffer file-path))
+    (agent-term-mcp-server-with-session-context nil
+      (let ((target-buffer (agent-term-mcp--get-xref-buffer file-path))
             (identifier-str (format "%s" identifier)))
         (with-current-buffer target-buffer
-          (if (and (xref-find-backend) (copilot-ide-mcp--lsp-connected-p))
+          (if (and (xref-find-backend) (agent-term-mcp--lsp-connected-p))
               (condition-case _err
                   (let ((xref-items
-                         (copilot-ide-mcp--call-xref-at-identifier
+                         (agent-term-mcp--call-xref-at-identifier
                           identifier-str
                           (lambda () (xref-backend-definitions
                                       (xref-find-backend) identifier-str)))))
                     (if xref-items
-                        (copilot-ide-mcp--xref-items-to-strings xref-items)
+                        (agent-term-mcp--xref-items-to-strings xref-items)
                       (format "No definition found for '%s'" identifier-str)))
                 (error
                  ;; LSP connected but request failed — fall through to grep
-                 (copilot-ide-mcp--grep-symbol-in-project
-                  identifier-str (or (plist-get (copilot-ide-mcp-server-get-session-context) :project-dir)
+                 (agent-term-mcp--grep-symbol-in-project
+                  identifier-str (or (plist-get (agent-term-mcp-server-get-session-context) :project-dir)
                                      default-directory)
                   'definitions-only)))
             ;; No LSP — use grep
-            (let ((results (copilot-ide-mcp--grep-symbol-in-project
-                            identifier-str (or (plist-get (copilot-ide-mcp-server-get-session-context) :project-dir)
+            (let ((results (agent-term-mcp--grep-symbol-in-project
+                            identifier-str (or (plist-get (agent-term-mcp-server-get-session-context) :project-dir)
                                                default-directory)
                             'definitions-only)))
               (or results (format "No definition found for '%s'" identifier-str)))))))))
 
-(defun copilot-ide-mcp-eval-elisp (expression)
+(defun agent-term-mcp-eval-elisp (expression)
   "Evaluate EXPRESSION as Emacs Lisp and return the result as a string."
   (condition-case err
       (let ((result (eval (read expression) t)))
         (format "%S" result))
     (error (format "Error: %s" (error-message-string err)))))
 
-(defun copilot-ide-mcp-get-buffer-content (file-path)
+(defun agent-term-mcp-get-buffer-content (file-path)
   "Return the current in-memory content of the buffer visiting FILE-PATH.
 Unlike reading the file from disk, this captures unsaved changes."
   (if (not file-path)
       (error "The file_path parameter is required")
     (let ((buffer (find-buffer-visiting
-                   (copilot-ide-mcp-server-expand-file-name file-path))))
+                   (agent-term-mcp-server-expand-file-name file-path))))
       (if buffer
           (with-current-buffer buffer
             (buffer-substring-no-properties (point-min) (point-max)))
         (format "No open buffer for %s" file-path)))))
 
-(defun copilot-ide-mcp-list-open-buffers ()
+(defun agent-term-mcp-list-open-buffers ()
   "Return a formatted list of open file-visiting buffers."
-  (let ((context (copilot-ide-mcp-server-get-session-context))
+  (let ((context (agent-term-mcp-server-get-session-context))
         (lines '()))
     (let ((project-dir (and context (plist-get context :project-dir))))
       (dolist (buffer (buffer-list))
@@ -440,11 +440,11 @@ Unlike reading the file from disk, this captures unsaved changes."
         (string-join (nreverse lines) "\n")
       "No file-visiting buffers open")))
 
-(defun copilot-ide-mcp-compilation-errors ()
+(defun agent-term-mcp-compilation-errors ()
   "Return errors and warnings from the most recent compilation buffer.
 Scopes to the current MCP session's project directory when available,
 so multi-project setups return the correct compilation buffer."
-  (let* ((context (copilot-ide-mcp-server-get-session-context))
+  (let* ((context (agent-term-mcp-server-get-session-context))
          (project-dir (and context (expand-file-name
                                     (plist-get context :project-dir))))
          (comp-buffer
@@ -491,7 +491,7 @@ so multi-project setups return the correct compilation buffer."
                        (tail-start (max 0 (- (length trimmed) 2000))))
                   (substring trimmed tail-start))))))))))
 
-(defun copilot-ide-mcp-get-visible-buffers ()
+(defun agent-term-mcp-get-visible-buffers ()
   "Return information about all buffers currently visible in Emacs windows.
 Each entry shows the file path (or buffer name), the visible line range,
 and whether the buffer has unsaved changes."
@@ -515,12 +515,12 @@ and whether the buffer has unsaved changes."
         (string-join (nreverse results) "\n")
       "No visible buffers")))
 
-(defun copilot-ide-mcp-get-current-region ()
+(defun agent-term-mcp-get-current-region ()
   "Return the current region or cursor position in the last-active buffer.
 Reports the file path and the line/column range of the active region.
 If no region is active, reports the cursor position instead.
 The selected text is included when a region is active."
-  (copilot-ide-mcp-server-with-session-context nil
+  (agent-term-mcp-server-with-session-context nil
     (if (not (buffer-file-name))
         "No file associated with the current buffer"
       (let* ((file-path (buffer-file-name))
@@ -543,15 +543,15 @@ The selected text is included when a region is active."
 ;;; Setup Function
 
 ;;;###autoload
-(defun copilot-ide-emacs-tools-setup ()
+(defun agent-term-emacs-tools-setup ()
   "Enable all Emacs MCP tools and activate the MCP server.
 Add this to your init file to expose xref, imenu, tree-sitter, and
 project information to the agent via the HTTP MCP server."
   (interactive)
-  (setq copilot-ide-enable-mcp-server t)
+  (setq agent-term-enable-mcp-server t)
 
-  (copilot-ide-make-tool
-   :function #'copilot-ide-mcp-xref-find-references
+  (agent-term-make-tool
+   :function #'agent-term-mcp-xref-find-references
    :name "xref_find_references"
    :description "Find where a function, variable, or class is used throughout the codebase"
    :args '((:name "identifier"
@@ -561,8 +561,8 @@ project information to the agent via the HTTP MCP server."
                   :type string
                   :description "File path to use as context for the search")))
 
-  (copilot-ide-make-tool
-   :function #'copilot-ide-mcp-xref-find-definitions
+  (agent-term-make-tool
+   :function #'agent-term-mcp-xref-find-definitions
    :name "xref_find_definitions"
    :description "Find where a function, variable, or class is defined"
    :args '((:name "identifier"
@@ -572,8 +572,8 @@ project information to the agent via the HTTP MCP server."
                   :type string
                   :description "File path to use as context for the search")))
 
-  (copilot-ide-make-tool
-   :function #'copilot-ide-mcp-xref-find-apropos
+  (agent-term-make-tool
+   :function #'agent-term-mcp-xref-find-apropos
    :name "xref_find_apropos"
    :description "Search for symbols by name pattern across the project"
    :args '((:name "pattern"
@@ -583,22 +583,22 @@ project information to the agent via the HTTP MCP server."
                   :type string
                   :description "File path to use as context for the search")))
 
-  (copilot-ide-make-tool
-   :function #'copilot-ide-mcp-project-info
+  (agent-term-make-tool
+   :function #'agent-term-mcp-project-info
    :name "project_info"
    :description "Get an overview of the current project: directory, active buffer, file count"
    :args nil)
 
-  (copilot-ide-make-tool
-   :function #'copilot-ide-mcp-imenu-list-symbols
+  (agent-term-make-tool
+   :function #'agent-term-mcp-imenu-list-symbols
    :name "imenu_list_symbols"
    :description "List all functions, classes, and variables in a file with their locations"
    :args '((:name "file_path"
                   :type string
                   :description "Path to the file to analyze")))
 
-  (copilot-ide-make-tool
-   :function #'copilot-ide-mcp-treesit-info
+  (agent-term-make-tool
+   :function #'agent-term-mcp-treesit-info
    :name "treesit_info"
    :description "Get tree-sitter syntax tree information for a file or position"
    :args '((:name "file_path"
@@ -625,10 +625,10 @@ project information to the agent via the HTTP MCP server."
                   :description "Include child nodes"
                   :optional t)))
 
-  (copilot-ide-diagnostics-setup)
+  (agent-term-diagnostics-setup)
 
-  (copilot-ide-make-tool
-   :function #'copilot-ide-mcp-eval-elisp
+  (agent-term-make-tool
+   :function #'agent-term-mcp-eval-elisp
    :name "eval_elisp"
    :description (concat "Evaluate an Emacs Lisp expression and return the result. "
                          "Useful for inspecting Emacs state, running commands, or "
@@ -637,8 +637,8 @@ project information to the agent via the HTTP MCP server."
                   :type string
                   :description "Emacs Lisp expression to evaluate")))
 
-  (copilot-ide-make-tool
-   :function #'copilot-ide-mcp-get-buffer-content
+  (agent-term-make-tool
+   :function #'agent-term-mcp-get-buffer-content
    :name "get_buffer_content"
    :description (concat "Return the current in-memory content of an open buffer, "
                          "including unsaved changes not yet written to disk.")
@@ -646,38 +646,38 @@ project information to the agent via the HTTP MCP server."
                   :type string
                   :description "Absolute path to the file whose buffer to read")))
 
-  (copilot-ide-make-tool
-   :function #'copilot-ide-mcp-list-open-buffers
+  (agent-term-make-tool
+   :function #'agent-term-mcp-list-open-buffers
    :name "list_open_buffers"
    :description (concat "List all open file-visiting buffers.  "
                          "Modified (unsaved) buffers are marked with *.  "
                          "Buffers inside the current project are marked with [project].")
    :args nil)
 
-  (copilot-ide-make-tool
-   :function #'copilot-ide-mcp-compilation-errors
+  (agent-term-make-tool
+   :function #'agent-term-mcp-compilation-errors
    :name "compilation_errors"
    :description (concat "Return errors and warnings from the most recent compilation "
                          "run (M-x compile).  Complements flycheck/flymake diagnostics "
                          "with build-time errors.")
    :args nil)
 
-  (copilot-ide-make-tool
-   :function #'copilot-ide-mcp-get-visible-buffers
+  (agent-term-make-tool
+   :function #'agent-term-mcp-get-visible-buffers
    :name "get_visible_buffers"
    :description (concat "Return all buffers currently visible in Emacs windows, "
                          "including file path, visible line range, and modification status. "
                          "Useful for understanding what the user is currently looking at.")
    :args nil)
 
-  (copilot-ide-make-tool
-   :function #'copilot-ide-mcp-get-current-region
+  (agent-term-make-tool
+   :function #'agent-term-mcp-get-current-region
    :name "get_current_region"
    :description (concat "Return the user's current text selection (region) in the last-active buffer. "
                          "Includes file path, start/end line and column, and the selected text. "
                          "Falls back to cursor position when no region is active.")
    :args nil))
 
-(provide 'copilot-ide-emacs-tools)
+(provide 'agent-term-emacs-tools)
 
-;;; copilot-ide-emacs-tools.el ends here
+;;; agent-term-emacs-tools.el ends here

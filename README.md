@@ -1,4 +1,4 @@
-# copilot-ide.el
+# agent-term.el
 
 Run an AI coding agent CLI — [GitHub Copilot CLI](https://docs.github.com/copilot/concepts/agents/about-copilot-cli)
 or [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) — in a
@@ -13,6 +13,8 @@ Typical uses:
 - let the agent ask Emacs (and its LSP client) for definitions and references
   instead of grepping.
 
+Formerly named copilot-ide.el.
+
 Heavily inspired by and based on [claude-code-ide.el](https://github.com/manzaltu/claude-code-ide.el)
 by Yoav Orot (manzaltu), used under GPL-3.0.
 
@@ -26,14 +28,14 @@ by Yoav Orot (manzaltu), used under GPL-3.0.
 ## Quick start
 
 ```elisp
-(use-package copilot-ide
-  :vc (:url "https://github.com/tohammer/copilot-ide.el")
-  :bind ("C-c C-'" . copilot-ide-menu)
+(use-package agent-term
+  :vc (:url "https://github.com/tohammer/agent-term.el")
+  :bind ("C-c C-'" . agent-term-menu)
   :custom
-  (copilot-ide-agent 'claude))   ; or 'copilot (the default)
+  (agent-term-agent 'claude))   ; or 'copilot (the default)
 ```
 
-Then, in a file of a project, `M-x copilot-ide` starts the agent in a side
+Then, in a file of a project, `M-x agent-term` starts the agent in a side
 window. Run it again to hide or show the window.
 
 ## Installation
@@ -41,16 +43,16 @@ window. Run it again to hide or show the window.
 ### Emacs 30+ (`use-package :vc`)
 
 ```elisp
-(use-package copilot-ide
-  :vc (:url "https://github.com/tohammer/copilot-ide.el")
-  :commands (copilot-ide copilot-ide-menu))
+(use-package agent-term
+  :vc (:url "https://github.com/tohammer/agent-term.el")
+  :commands (agent-term agent-term-menu))
 ```
 
 ### Emacs 29 (`package-vc-install`)
 
 ```elisp
-(package-vc-install "https://github.com/tohammer/copilot-ide.el")
-(require 'copilot-ide)
+(package-vc-install "https://github.com/tohammer/agent-term.el")
+(require 'agent-term)
 ```
 
 ### Doom Emacs
@@ -59,18 +61,18 @@ In `packages.el`:
 
 ```elisp
 (package! ghostel :recipe (:host github :repo "dakra/ghostel"))
-(package! copilot-ide :recipe (:host github :repo "tohammer/copilot-ide.el"))
+(package! agent-term :recipe (:host github :repo "tohammer/agent-term.el"))
 ```
 
 In `config.el`:
 
 ```elisp
-(use-package! copilot-ide
-  :commands (copilot-ide copilot-ide-menu))
+(use-package! agent-term
+  :commands (agent-term agent-term-menu))
 ```
 
 Doom shows terminal buffers as popups by default. To show sessions in the
-current window instead (with `copilot-ide-use-side-window` set to nil):
+current window instead (with `agent-term-use-side-window` set to nil):
 
 ```elisp
 (set-popup-rule! "^\\*\\(copilot\\|claude\\)\\[" :ignore t)
@@ -80,20 +82,20 @@ current window instead (with `copilot-ide-use-side-window` set to nil):
 
 | Command                            | Description                                               |
 |------------------------------------|-----------------------------------------------------------|
-| `copilot-ide`                      | Start the agent for the project, or toggle its window     |
-| `copilot-ide-start-agent`          | Start a chosen agent, regardless of `copilot-ide-agent`    |
-| `copilot-ide-continue`             | Start with `--continue` (last conversation of the project) |
-| `copilot-ide-resume`               | Start with `--resume`; `C-u` asks for a session ID        |
-| `copilot-ide-stop`                 | Stop the session                                          |
-| `copilot-ide-toggle`               | Hide or show the session window                           |
-| `copilot-ide-toggle-recent`        | Hide all session windows, or show the most recent one     |
-| `copilot-ide-switch-to-buffer`     | Select the session window                                 |
-| `copilot-ide-list-sessions`        | Pick one of the running sessions                          |
-| `copilot-ide-send-prompt`          | Send a prompt from the minibuffer                         |
-| `copilot-ide-send-escape`          | Send ESC to the agent                                     |
-| `copilot-ide-insert-newline`       | Insert a newline in the agent prompt                      |
-| `copilot-ide-check-status`         | Show the agent CLI version                                |
-| `copilot-ide-menu`                 | Transient menu with all of the above and the settings     |
+| `agent-term`                      | Start the agent for the project, or toggle its window     |
+| `agent-term-start-agent`          | Start a chosen agent, regardless of `agent-term-agent`    |
+| `agent-term-continue`             | Start with `--continue` (last conversation of the project) |
+| `agent-term-resume`               | Start with `--resume`; `C-u` asks for a session ID        |
+| `agent-term-stop`                 | Stop the session                                          |
+| `agent-term-toggle`               | Hide or show the session window                           |
+| `agent-term-toggle-recent`        | Hide all session windows, or show the most recent one     |
+| `agent-term-switch-to-buffer`     | Select the session window                                 |
+| `agent-term-list-sessions`        | Pick one of the running sessions                          |
+| `agent-term-send-prompt`          | Send a prompt from the minibuffer                         |
+| `agent-term-send-escape`          | Send ESC to the agent                                     |
+| `agent-term-insert-newline`       | Insert a newline in the agent prompt                      |
+| `agent-term-check-status`         | Show the agent CLI version                                |
+| `agent-term-menu`                 | Transient menu with all of the above and the settings     |
 
 The session commands act on the session of the current buffer when called
 from a session buffer, otherwise on the session of the current project.
@@ -102,12 +104,12 @@ Keys in a session buffer (in addition to ghostel's own):
 
 | Key          | Action                                                     |
 |--------------|------------------------------------------------------------|
-| `S-RET`      | `copilot-ide-insert-newline` (backslash + return)          |
-| `C-<escape>` | `copilot-ide-send-escape`                                  |
+| `S-RET`      | `agent-term-insert-newline` (backslash + return)          |
+| `C-<escape>` | `agent-term-send-escape`                                  |
 | `C-_`        | sent to the agent, even when an undo mode binds it globally |
 
 Add keys that Emacs should handle instead of the terminal to
-`copilot-ide-emacs-keybindings`, e.g. `'("C-l")`.
+`agent-term-emacs-keybindings`, e.g. `'("C-l")`.
 
 ## Configuration
 
@@ -115,24 +117,24 @@ Add keys that Emacs should handle instead of the terminal to
 
 | Variable                          | Default    | Description                                                  |
 |-----------------------------------|------------|--------------------------------------------------------------|
-| `copilot-ide-agent`               | `copilot`  | Agent for new sessions: `copilot` or `claude`                 |
-| `copilot-ide-cli-path`            | `nil`      | Agent executable; nil means `copilot` or `claude` on `PATH`  |
-| `copilot-ide-cli-extra-flags`     | `""`       | Extra flags, split like a shell command line                 |
-| `copilot-ide-environment`         | `nil`      | Extra `"NAME=VALUE"` environment variables for the agent     |
-| `copilot-ide-buffer-name-function`| default    | Called with the project directory and the agent              |
-| `copilot-ide-use-side-window`     | `t`        | Side window; nil uses `pop-to-buffer-same-window`            |
-| `copilot-ide-window-side`         | `right`    | `left`, `right`, `top` or `bottom`                           |
-| `copilot-ide-window-width`        | `100`      | Width for left/right side windows                            |
-| `copilot-ide-window-height`       | `20`       | Height for top/bottom side windows                           |
-| `copilot-ide-focus-on-open`       | `t`        | Select the window when it is shown                           |
-| `copilot-ide-show-modeline`       | `t`        | Turn `hide-mode-line-mode` off in session buffers            |
-| `copilot-ide-emacs-keybindings`   | `()`       | Keys handled by their global Emacs binding                   |
+| `agent-term-agent`               | `copilot`  | Agent for new sessions: `copilot` or `claude`                 |
+| `agent-term-cli-path`            | `nil`      | Agent executable; nil means `copilot` or `claude` on `PATH`  |
+| `agent-term-cli-extra-flags`     | `""`       | Extra flags, split like a shell command line                 |
+| `agent-term-environment`         | `nil`      | Extra `"NAME=VALUE"` environment variables for the agent     |
+| `agent-term-buffer-name-function`| default    | Called with the project directory and the agent              |
+| `agent-term-use-side-window`     | `t`        | Side window; nil uses `pop-to-buffer-same-window`            |
+| `agent-term-window-side`         | `right`    | `left`, `right`, `top` or `bottom`                           |
+| `agent-term-window-width`        | `100`      | Width for left/right side windows                            |
+| `agent-term-window-height`       | `20`       | Height for top/bottom side windows                           |
+| `agent-term-focus-on-open`       | `t`        | Select the window when it is shown                           |
+| `agent-term-show-modeline`       | `t`        | Turn `hide-mode-line-mode` off in session buffers            |
+| `agent-term-emacs-keybindings`   | `()`       | Keys handled by their global Emacs binding                   |
 
 Example for a different Claude model:
 
 ```elisp
-(setq copilot-ide-agent 'claude
-      copilot-ide-cli-extra-flags "--model sonnet")
+(setq agent-term-agent 'claude
+      agent-term-cli-extra-flags "--model sonnet")
 ```
 
 ### Tool permissions
@@ -141,10 +143,10 @@ Entries are passed to the agent as they are, so they use the agent's own syntax.
 
 | Variable                          | Copilot flag         | Claude flag          |
 |-----------------------------------|----------------------|----------------------|
-| `copilot-ide-mcp-available-tools` | `--available-tools`  | not supported (warning) |
-| `copilot-ide-mcp-excluded-tools`  | `--excluded-tools`   | `--disallowedTools`  |
-| `copilot-ide-mcp-allow-tools`     | `--allow-tool`       | `--allowedTools`     |
-| `copilot-ide-mcp-deny-tools`      | `--deny-tool`        | `--disallowedTools`  |
+| `agent-term-mcp-available-tools` | `--available-tools`  | not supported (warning) |
+| `agent-term-mcp-excluded-tools`  | `--excluded-tools`   | `--disallowedTools`  |
+| `agent-term-mcp-allow-tools`     | `--allow-tool`       | `--allowedTools`     |
+| `agent-term-mcp-deny-tools`      | `--deny-tool`        | `--disallowedTools`  |
 
 Copilot entries look like `"ServerName"` or `"ServerName(tool_name)"`;
 Claude entries like `"mcp__emacs-tools"`, `"mcp__emacs-tools__imenu_list_symbols"`
@@ -152,21 +154,21 @@ or `"Bash(git log:*)"`.
 
 ```elisp
 ;; Let Claude use all Emacs tools without asking.
-(setq copilot-ide-mcp-allow-tools '("mcp__emacs-tools"))
+(setq agent-term-mcp-allow-tools '("mcp__emacs-tools"))
 ;; The same for Copilot.
-(setq copilot-ide-mcp-allow-tools '("emacs-tools"))
+(setq agent-term-mcp-allow-tools '("emacs-tools"))
 ```
 
 ### Emacs MCP tools
 
 ```elisp
-(with-eval-after-load 'copilot-ide
-  (copilot-ide-emacs-tools-setup))
+(with-eval-after-load 'agent-term
+  (agent-term-emacs-tools-setup))
 ```
 
-This turns on `copilot-ide-enable-mcp-server` and registers the tools below
+This turns on `agent-term-enable-mcp-server` and registers the tools below
 under the MCP server name `emacs-tools`. The server listens on 127.0.0.1
-only, on a free port (or `copilot-ide-mcp-server-port`), and every session
+only, on a free port (or `agent-term-mcp-server-port`), and every session
 gets an endpoint with a random secret token; other requests are refused.
 
 | Tool                     | Description                                               |
@@ -187,17 +189,17 @@ gets an endpoint with a random secret token; other requests are refused.
 
 Relative file paths are resolved against the project root. The agent asks
 for permission before each tool call unless the tool is allowed with
-`copilot-ide-mcp-allow-tools`; be careful with `eval_elisp`.
+`agent-term-mcp-allow-tools`; be careful with `eval_elisp`.
 
 Your own tools:
 
 ```elisp
 (defun my-project-todo-count ()
   ;; Run in the user's last file buffer of the session's project.
-  (copilot-ide-mcp-server-with-session-context nil
+  (agent-term-mcp-server-with-session-context nil
     (number-to-string (how-many "TODO" (point-min) (point-max)))))
 
-(copilot-ide-make-tool
+(agent-term-make-tool
  :name "todo_count"
  :function #'my-project-todo-count
  :description "Count TODO markers in the user's current buffer"
@@ -205,19 +207,19 @@ Your own tools:
 ```
 
 Tool functions receive their arguments in the order of `:args`; JSON `false`
-and `null` arrive as nil. `copilot-ide-mcp-server-with-session-context` makes
+and `null` arrive as nil. `agent-term-mcp-server-with-session-context` makes
 the user's last file buffer of the session's project current and binds
 `default-directory` to the project root.
 
 ## Debugging
 
 ```elisp
-(setq copilot-ide-debug t)
-(copilot-ide-show-debug)   ; *copilot-ide-debug*
-(copilot-ide-clear-debug)
+(setq agent-term-debug t)
+(agent-term-show-debug)   ; *agent-term-debug*
+(agent-term-clear-debug)
 ```
 
-Or use the debug submenu of `copilot-ide-menu`.
+Or use the debug submenu of `agent-term-menu`.
 
 ## Development
 

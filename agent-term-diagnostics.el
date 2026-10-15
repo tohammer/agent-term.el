@@ -1,4 +1,4 @@
-;;; copilot-ide-diagnostics.el --- Flycheck/Flymake diagnostics MCP tool  -*- lexical-binding: t; -*-
+;;; agent-term-diagnostics.el --- Flycheck/Flymake diagnostics MCP tool  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2025 Tobias Hammer
 ;; Copyright (C) 2025 Yoav Orot
@@ -26,7 +26,7 @@
 
 ;;; Commentary:
 
-;; Flycheck and Flymake diagnostic collection for copilot-ide.el.
+;; Flycheck and Flymake diagnostic collection for agent-term.el.
 ;;
 ;; Exposes a `get_diagnostics' MCP tool that the agent can call to retrieve
 ;; current errors and warnings from open buffers.  Supports both Flycheck
@@ -40,8 +40,8 @@
 
 (require 'cl-lib)
 (require 'subr-x)
-(require 'copilot-ide-debug)
-(require 'copilot-ide-mcp-server)
+(require 'agent-term-debug)
+(require 'agent-term-mcp-server)
 
 (require 'flycheck nil t)
 (require 'flymake nil t)
@@ -58,7 +58,7 @@
 
 ;;; Customization
 
-(defcustom copilot-ide-diagnostics-backend 'auto
+(defcustom agent-term-diagnostics-backend 'auto
   "Backend to use for collecting diagnostics.
 - `auto'     Prefer flycheck if active, fall back to flymake.
 - `flycheck' Always use flycheck.
@@ -66,11 +66,11 @@
   :type '(choice (const :tag "Automatic" auto)
                  (const :tag "Flycheck" flycheck)
                  (const :tag "Flymake" flymake))
-  :group 'copilot-ide)
+  :group 'agent-term)
 
 ;;; Internal: Severity Conversion
 
-(defun copilot-ide-diagnostics--severity-string (severity)
+(defun agent-term-diagnostics--severity-string (severity)
   "Convert diagnostic SEVERITY symbol to a human-readable string."
   (pcase severity
     ((or 'error ':error 'flymake-error) "Error")
@@ -81,7 +81,7 @@
 
 ;;; Internal: Backend Collection
 
-(defun copilot-ide-diagnostics--flycheck (buffer)
+(defun agent-term-diagnostics--flycheck (buffer)
   "Return Flycheck diagnostics for BUFFER as a list of plists, or nil."
   (when (featurep 'flycheck)
     (with-current-buffer buffer
@@ -93,13 +93,13 @@
                                       (flycheck-error-line err))
                         :end-column (or (flycheck-error-end-column err)
                                         (flycheck-error-column err) 1)
-                        :severity (copilot-ide-diagnostics--severity-string
+                        :severity (agent-term-diagnostics--severity-string
                                    (flycheck-error-level err))
                         :source (format "%s" (or (flycheck-error-checker err) 'flycheck))
                         :message (flycheck-error-message err)))
                 flycheck-current-errors)))))
 
-(defun copilot-ide-diagnostics--flymake (buffer)
+(defun agent-term-diagnostics--flymake (buffer)
   "Return Flymake diagnostics for BUFFER as a list of plists, or nil."
   (when (featurep 'flymake)
     (with-current-buffer buffer
@@ -116,16 +116,16 @@
                             :column beg-col
                             :end-line end-line
                             :end-column end-col
-                            :severity (copilot-ide-diagnostics--severity-string
+                            :severity (agent-term-diagnostics--severity-string
                                        (flymake-diagnostic-type diag))
                             :source (format "%s" (or (flymake-diagnostic-backend diag)
                                                      'flymake))
                             :message (flymake-diagnostic-text diag)))))
                 (flymake-diagnostics))))))
 
-(defun copilot-ide-diagnostics--collect (buffer)
+(defun agent-term-diagnostics--collect (buffer)
   "Return diagnostics for BUFFER using the configured backend."
-  (let ((backend copilot-ide-diagnostics-backend))
+  (let ((backend agent-term-diagnostics-backend))
     (when (eq backend 'auto)
       (setq backend
             (with-current-buffer buffer
@@ -134,13 +134,13 @@
                ((and (featurep 'flymake)  (bound-and-true-p flymake-mode))  'flymake)
                (t nil)))))
     (pcase backend
-      ('flycheck (copilot-ide-diagnostics--flycheck buffer))
-      ('flymake  (copilot-ide-diagnostics--flymake  buffer))
+      ('flycheck (agent-term-diagnostics--flycheck buffer))
+      ('flymake  (agent-term-diagnostics--flymake  buffer))
       (_ nil))))
 
 ;;; Internal: Formatting
 
-(defun copilot-ide-diagnostics--format-one (file-path diags)
+(defun agent-term-diagnostics--format-one (file-path diags)
   "Format DIAGS for FILE-PATH as a readable string block."
   (let ((lines (list (format "=== %s ===" file-path))))
     (dolist (d diags)
@@ -155,24 +155,24 @@
 
 ;;; Public: MCP Tool Function
 
-(defun copilot-ide-get-diagnostics (&optional file-path)
+(defun agent-term-get-diagnostics (&optional file-path)
   "Return diagnostics from Flycheck/Flymake for FILE-PATH (or all project files).
 When FILE-PATH is nil or empty, all open buffers that belong to the current
 MCP session's project are checked.
 Returns a formatted string suitable for the agent's context window."
-  (copilot-ide-mcp-server-with-session-context nil
-    (let* ((context (copilot-ide-mcp-server-get-session-context))
+  (agent-term-mcp-server-with-session-context nil
+    (let* ((context (agent-term-mcp-server-get-session-context))
            (project-dir (plist-get context :project-dir))
            (results '()))
       (if (and file-path (not (string-empty-p file-path)))
           ;; Single file
-          (let* ((file (copilot-ide-mcp-server-expand-file-name file-path))
+          (let* ((file (agent-term-mcp-server-expand-file-name file-path))
                  (buffer (or (find-buffer-visiting file)
                              (find-file-noselect file))))
             (when buffer
-              (let ((diags (copilot-ide-diagnostics--collect buffer)))
+              (let ((diags (agent-term-diagnostics--collect buffer)))
                 (if diags
-                    (push (copilot-ide-diagnostics--format-one file-path diags) results)
+                    (push (agent-term-diagnostics--format-one file-path diags) results)
                   (push (format "No diagnostics for %s" file-path) results)))))
         ;; All open project buffers
         (dolist (buffer (buffer-list))
@@ -181,9 +181,9 @@ Returns a formatted string suitable for the agent's context window."
                       ((or (not project-dir)
                            (string-prefix-p (expand-file-name project-dir)
                                             (expand-file-name file)))))
-            (let ((diags (copilot-ide-diagnostics--collect buffer)))
+            (let ((diags (agent-term-diagnostics--collect buffer)))
               (when diags
-                (push (copilot-ide-diagnostics--format-one file diags) results)))))
+                (push (agent-term-diagnostics--format-one file diags) results)))))
         (unless results
           (push (format "No diagnostics found%s"
                         (if project-dir (format " in project %s" project-dir) ""))
@@ -193,11 +193,11 @@ Returns a formatted string suitable for the agent's context window."
 ;;; Tool Registration
 
 ;;;###autoload
-(defun copilot-ide-diagnostics-setup ()
+(defun agent-term-diagnostics-setup ()
   "Register the get_diagnostics MCP tool.
-This is called automatically by `copilot-ide-emacs-tools-setup'."
-  (copilot-ide-make-tool
-   :function #'copilot-ide-get-diagnostics
+This is called automatically by `agent-term-emacs-tools-setup'."
+  (agent-term-make-tool
+   :function #'agent-term-get-diagnostics
    :name "get_diagnostics"
    :description (concat "Get current errors and warnings from Flycheck or Flymake "
                          "for a specific file or all open project files. "
@@ -207,6 +207,6 @@ This is called automatically by `copilot-ide-emacs-tools-setup'."
                   :description "File to get diagnostics for.  Omit to check all open project files."
                   :optional t))))
 
-(provide 'copilot-ide-diagnostics)
+(provide 'agent-term-diagnostics)
 
-;;; copilot-ide-diagnostics.el ends here
+;;; agent-term-diagnostics.el ends here
