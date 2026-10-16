@@ -85,6 +85,10 @@
   "In a draft buffer: the project directory the draft is sent to.")
 (put 'agent-term-draft--directory 'permanent-local t)
 
+(defvar-local agent-term-draft--meta nil
+  "In a draft buffer: the plist written to the draft's .eld file.")
+(put 'agent-term-draft--meta 'permanent-local t)
+
 (defvar-local agent-term-draft--finished nil
   "In a draft buffer: non-nil once the draft was sent or cancelled.")
 (put 'agent-term-draft--finished 'permanent-local t)
@@ -149,14 +153,27 @@ Each is a plist with :id, :directory, :agent and :created."
                            (equal (plist-get meta :directory) directory)))
              collect meta)))
 
+(defun agent-term-draft--delete-files (id)
+  "Delete the files of draft ID, if they exist."
+  (dolist (ext '("txt" "eld"))
+    (let ((file (agent-term-draft--file id ext)))
+      (when (file-exists-p file) (delete-file file)))))
+
 (defun agent-term-draft--save (&optional buffer)
-  "Write the text of the draft BUFFER (default: current buffer) to disk."
+  "Write the text of the draft BUFFER (default: current buffer) to disk.
+A draft with only whitespace is not kept: its files are deleted."
   (with-current-buffer (or buffer (current-buffer))
     (when (and agent-term-draft--id (not agent-term-draft--finished))
-      (save-restriction
-        (widen)
-        (agent-term-draft--write (agent-term-draft--file agent-term-draft--id "txt")
-                                 (buffer-substring-no-properties (point-min) (point-max))))
+      (let ((text (save-restriction
+                    (widen)
+                    (buffer-substring-no-properties (point-min) (point-max)))))
+        (if (string-blank-p text)
+            (agent-term-draft--delete-files agent-term-draft--id)
+          (agent-term-draft--write (agent-term-draft--file agent-term-draft--id "eld")
+                                   (let ((print-length nil) (print-level nil))
+                                     (prin1-to-string agent-term-draft--meta)))
+          (agent-term-draft--write (agent-term-draft--file agent-term-draft--id "txt")
+                                   text)))
       (setq agent-term-draft--saved-tick (buffer-chars-modified-tick)))))
 (put 'agent-term-draft--save 'permanent-local-hook t)
 
@@ -216,7 +233,8 @@ change in the buffer."
             (funcall agent-term-draft-major-mode)
             (setq default-directory (file-name-as-directory directory)
                   agent-term-draft--id id
-                  agent-term-draft--directory directory)
+                  agent-term-draft--directory directory
+                  agent-term-draft--meta meta)
             (insert (or (agent-term-draft--read (agent-term-draft--file id "txt")) ""))
             (set-buffer-modified-p nil)
             (setq agent-term-draft--saved-tick (buffer-chars-modified-tick))
@@ -226,17 +244,13 @@ change in the buffer."
           buffer))))
 
 (defun agent-term-draft--create (session)
-  "Create a new draft for SESSION and return its buffer."
-  (let* ((id (agent-term-draft--new-id))
-         (meta (list :id id
-                     :directory (agent-term--session-directory session)
-                     :agent (agent-term--session-agent session)
-                     :created (format-time-string "%F %T"))))
-    (agent-term-draft--write (agent-term-draft--file id "eld")
-                             (let ((print-length nil) (print-level nil))
-                               (prin1-to-string meta)))
-    (agent-term-draft--write (agent-term-draft--file id "txt") "")
-    (agent-term-draft--open meta)))
+  "Create a new draft for SESSION and return its buffer.
+Nothing is written to disk until the draft has text."
+  (agent-term-draft--open
+   (list :id (agent-term-draft--new-id)
+         :directory (agent-term--session-directory session)
+         :agent (agent-term--session-agent session)
+         :created (format-time-string "%F %T"))))
 
 (defun agent-term-draft--display (buffer)
   "Show and select the draft BUFFER below the selected window."
@@ -248,9 +262,7 @@ change in the buffer."
   "Delete the files of the draft BUFFER and close it."
   (with-current-buffer buffer
     (setq agent-term-draft--finished t)
-    (dolist (ext '("txt" "eld"))
-      (let ((file (agent-term-draft--file agent-term-draft--id ext)))
-        (when (file-exists-p file) (delete-file file)))))
+    (agent-term-draft--delete-files agent-term-draft--id))
   (dolist (window (get-buffer-window-list buffer nil t))
     (quit-restore-window window))
   (kill-buffer buffer))

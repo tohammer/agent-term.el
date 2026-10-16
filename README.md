@@ -132,7 +132,8 @@ with full Emacs editing:
   stays there until it is sent or thrown away. Killing the buffer or
   restarting Emacs does not lose it: `C-u C-c '` reopens a saved draft of
   the project, `M-x agent-term-drafts` one of any project. Starting a
-  session reports its saved drafts.
+  session reports its saved drafts. Empty drafts (only whitespace) are
+  not saved.
 - A draft belongs to its project directory and goes to the session that runs
   there when you send it. Without a running session, the draft is kept.
 

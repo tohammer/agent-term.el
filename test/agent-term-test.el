@@ -548,15 +548,15 @@ LOG is bound to the agent's log file."
                  (drafts (list (agent-term-draft--create sa) (agent-term-draft--create sa)
                                (agent-term-draft--create sb))))
             (should (equal (length (delete-dups (copy-sequence drafts))) 3))
-            (should (equal (length (agent-term-draft--saved)) 3))
-            (should (equal (length (agent-term-draft--saved a)) 2))
-            (should (equal (length (agent-term-draft--saved b)) 1))
             (cl-loop for d in drafts for i from 0
                      do (with-current-buffer d (insert (format "text %d" i))))
             (should (agent-term-test--wait-for
                      (lambda () (cl-every (lambda (d) (equal (agent-term-test--draft-text d)
                                                               (with-current-buffer d (buffer-string))))
-                                          drafts)))))
+                                          drafts))))
+            (should (equal (length (agent-term-draft--saved)) 3))
+            (should (equal (length (agent-term-draft--saved a)) 2))
+            (should (equal (length (agent-term-draft--saved b)) 1)))
         (delete-directory root t)))))
 
 (ert-deftest agent-term-test-draft-saved-while-typing ()
@@ -567,6 +567,25 @@ LOG is bound to the agent's log file."
       (with-current-buffer draft (insert "hello"))
       (should (agent-term-test--wait-for
                (lambda () (equal (agent-term-test--draft-text draft) "hello")))))))
+
+(ert-deftest agent-term-test-draft-empty-not-saved ()
+  "A draft with only whitespace leaves no files behind."
+  (skip-unless (agent-term-test--ghostel-p))
+  (agent-term-test--with-drafts _log
+    (let* ((draft (agent-term-draft--create (agent-term-test--start temporary-file-directory)))
+           (id (buffer-local-value 'agent-term-draft--id draft)))
+      (should-not (agent-term-draft--saved))
+      (with-current-buffer draft (insert "  \n"))
+      (agent-term-draft--save draft)
+      (should-not (agent-term-draft--saved))
+      (with-current-buffer draft (insert "text"))
+      (should (agent-term-test--wait-for (lambda () (agent-term-draft--saved))))
+      (with-current-buffer draft (erase-buffer))
+      (should (agent-term-test--wait-for (lambda () (null (agent-term-draft--saved)))))
+      (kill-buffer draft)
+      (should-not (agent-term-draft--saved))
+      (should-not (file-exists-p (agent-term-draft--file id "txt")))
+      (should-not (file-exists-p (agent-term-draft--file id "eld"))))))
 
 (ert-deftest agent-term-test-draft-survives-kill-and-restart ()
   "Killing the buffer or restarting Emacs keeps the draft."
@@ -665,6 +684,7 @@ LOG is bound to the agent's log file."
     (let* ((dir temporary-file-directory)
            (draft (agent-term-draft--create (agent-term-test--start dir)))
            (messages nil))
+      (with-current-buffer draft (insert "unsent"))
       (kill-buffer draft)
       (let ((kill-buffer-query-functions nil))
         (kill-buffer (agent-term--session-buffer (agent-term--session-for-directory dir))))

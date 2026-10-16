@@ -104,8 +104,11 @@ Tests: `agent-term-test-same-basename-projects`,
 with the minor mode `agent-term-draft-mode` (C-c C-c send, C-c C-k cancel).
 It is identified by an id (creation time plus random suffix) and stored as
 two files in `agent-term-draft-directory`: `ID.eld` (plist: id, project
-directory, agent, creation time; written once) and `ID.txt` (the text).
-Sending or cancelling deletes both; nothing else does.
+directory, agent, creation time) and `ID.txt` (the text). Both are written
+only while the text is not blank; a draft that is or becomes blank has no
+files, so empty drafts never show up as saved. Sending or cancelling
+deletes both; otherwise only emptying the draft does. Test:
+`agent-term-test-draft-empty-not-saved`.
 
 - **Many drafts:** every `agent-term-draft` creates a new id and buffer;
   buffers are found by their buffer-local id, never by name. Test:
