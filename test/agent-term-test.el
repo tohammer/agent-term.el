@@ -496,6 +496,184 @@ Strings in a list are sent as separate writes.  Return (STATUS . BODY)."
       (should (agent-term-test--wait-for
                (lambda () (string-match-p "hello agent" (agent-term-test--read-log log))))))))
 
+;;; Drafts
+
+(defmacro agent-term-test--with-drafts (log &rest body)
+  "Run BODY with the fake agent and an empty draft directory.
+LOG is bound to the agent's log file."
+  (declare (indent 1))
+  `(agent-term-test--with-agent-env ,log
+     (let ((agent-term-draft-directory (file-name-as-directory (make-temp-file "drafts" t)))
+           (agent-term-draft-save-delay 0.05))
+       (unwind-protect
+           (progn ,@body)
+         (dolist (b (agent-term-draft--buffers))
+           (with-current-buffer b (setq agent-term-draft--finished t))
+           (kill-buffer b))
+         (delete-directory agent-term-draft-directory t)))))
+
+(defun agent-term-test--draft-text (buffer)
+  "Return the saved text of the draft BUFFER."
+  (agent-term-draft--read
+   (agent-term-draft--file (buffer-local-value 'agent-term-draft--id buffer) "txt")))
+
+(defun agent-term-test--start (directory)
+  "Start a fake-agent session in DIRECTORY and wait until it runs."
+  (let ((session (agent-term--create-session 'claude directory)))
+    (should (agent-term-test--wait-for
+             (lambda () (string-match-p "READY" (agent-term-test--read-log
+                                                 (substring (car (last agent-term-environment))
+                                                            (length "FAKE_AGENT_LOG=")))))))
+    session))
+
+(ert-deftest agent-term-test-draft-key-in-session ()
+  "C-c ' opens a draft from a session buffer."
+  (skip-unless (agent-term-test--ghostel-p))
+  (agent-term-test--with-drafts _log
+    (let ((session (agent-term-test--start temporary-file-directory)))
+      (with-current-buffer (agent-term--session-buffer session)
+        (should (eq (key-binding (kbd "C-c '")) #'agent-term-draft))))))
+
+(ert-deftest agent-term-test-draft-many ()
+  "Any number of drafts can be open, for one or several sessions."
+  (skip-unless (agent-term-test--ghostel-p))
+  (agent-term-test--with-drafts _log
+    (let* ((root (make-temp-file "roots" t))
+           (a (file-name-as-directory (expand-file-name "a" root)))
+           (b (file-name-as-directory (expand-file-name "b" root))))
+      (make-directory a) (make-directory b)
+      (unwind-protect
+          (let* ((sa (agent-term-test--start a))
+                 (sb (agent-term-test--start b))
+                 (drafts (list (agent-term-draft--create sa) (agent-term-draft--create sa)
+                               (agent-term-draft--create sb))))
+            (should (equal (length (delete-dups (copy-sequence drafts))) 3))
+            (should (equal (length (agent-term-draft--saved)) 3))
+            (should (equal (length (agent-term-draft--saved a)) 2))
+            (should (equal (length (agent-term-draft--saved b)) 1))
+            (cl-loop for d in drafts for i from 0
+                     do (with-current-buffer d (insert (format "text %d" i))))
+            (should (agent-term-test--wait-for
+                     (lambda () (cl-every (lambda (d) (equal (agent-term-test--draft-text d)
+                                                              (with-current-buffer d (buffer-string))))
+                                          drafts)))))
+        (delete-directory root t)))))
+
+(ert-deftest agent-term-test-draft-saved-while-typing ()
+  "Typed text reaches the disk shortly after the change."
+  (skip-unless (agent-term-test--ghostel-p))
+  (agent-term-test--with-drafts _log
+    (let ((draft (agent-term-draft--create (agent-term-test--start temporary-file-directory))))
+      (with-current-buffer draft (insert "hello"))
+      (should (agent-term-test--wait-for
+               (lambda () (equal (agent-term-test--draft-text draft) "hello")))))))
+
+(ert-deftest agent-term-test-draft-survives-kill-and-restart ()
+  "Killing the buffer or restarting Emacs keeps the draft."
+  (skip-unless (agent-term-test--ghostel-p))
+  (agent-term-test--with-drafts _log
+    (let* ((session (agent-term-test--start temporary-file-directory))
+           (draft (agent-term-draft--create session))
+           (id (buffer-local-value 'agent-term-draft--id draft)))
+      ;; Killed right after typing, before the delayed save.
+      (with-current-buffer draft (insert "first line\nsecond"))
+      (kill-buffer draft)
+      (let ((saved (agent-term-draft--saved temporary-file-directory)))
+        (should (equal (mapcar (lambda (m) (plist-get m :id)) saved) (list id)))
+        ;; Reopen through the command, as after a restart.
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt choices &rest _) (cadr choices))))
+          (with-current-buffer (agent-term--session-buffer session)
+            (agent-term-draft t)))
+        (let ((reopened (agent-term-draft--buffer-for-id id)))
+          (should reopened)
+          (should (equal (with-current-buffer reopened (buffer-string)) "first line\nsecond"))
+          ;; kill-emacs-hook saves pending changes.
+          (with-current-buffer reopened (insert "!"))
+          (should (memq #'agent-term-draft--save-all kill-emacs-hook))
+          (agent-term-draft--save-all)
+          (should (equal (agent-term-test--draft-text reopened) "first line\nsecond!")))))))
+
+(ert-deftest agent-term-test-draft-survives-major-mode-change ()
+  "Changing the major mode of a draft keeps it a saved draft."
+  (skip-unless (agent-term-test--ghostel-p))
+  (agent-term-test--with-drafts _log
+    (let ((draft (agent-term-draft--create (agent-term-test--start temporary-file-directory))))
+      (with-current-buffer draft
+        (fundamental-mode)
+        (insert "still saved")
+        (should (eq (key-binding (kbd "C-c C-c")) #'agent-term-draft-send)))
+      (should (agent-term-test--wait-for
+               (lambda () (equal (agent-term-test--draft-text draft) "still saved"))))
+      ;; The kill-buffer save survives the mode change as well.
+      (with-current-buffer draft (insert "!"))
+      (kill-buffer draft)
+      (should (equal (agent-term-draft--read
+                      (agent-term-draft--file
+                       (plist-get (car (agent-term-draft--saved)) :id) "txt"))
+                     "still saved!")))))
+
+(ert-deftest agent-term-test-draft-send ()
+  "C-c C-c sends the whole text to the agent and removes the draft."
+  (skip-unless (agent-term-test--ghostel-p))
+  (agent-term-test--with-drafts log
+    (let* ((session (agent-term-test--start temporary-file-directory))
+           (draft (agent-term-draft--create session))
+           (id (buffer-local-value 'agent-term-draft--id draft)))
+      (with-current-buffer draft
+        (insert "line one\nline two\n")
+        (agent-term-draft-send))
+      (should-not (buffer-live-p draft))
+      (should-not (file-exists-p (agent-term-draft--file id "txt")))
+      (should-not (file-exists-p (agent-term-draft--file id "eld")))
+      (should (agent-term-test--wait-for
+               (lambda () (let ((text (agent-term-test--read-log log)))
+                            (and (string-match-p "line one" text)
+                                 (string-match-p "line two" text)))))))))
+
+(ert-deftest agent-term-test-draft-cancel ()
+  "C-c C-k removes the draft and sends nothing."
+  (skip-unless (agent-term-test--ghostel-p))
+  (agent-term-test--with-drafts log
+    (let* ((draft (agent-term-draft--create (agent-term-test--start temporary-file-directory))))
+      (with-current-buffer draft
+        (insert "secret plan")
+        (agent-term-draft-cancel))
+      (should-not (buffer-live-p draft))
+      (should-not (agent-term-draft--saved))
+      (accept-process-output nil 0.3)
+      (should-not (string-match-p "secret plan" (agent-term-test--read-log log))))))
+
+(ert-deftest agent-term-test-draft-kept-without-session ()
+  "Sending without a running session keeps the draft."
+  (skip-unless (agent-term-test--ghostel-p))
+  (agent-term-test--with-drafts _log
+    (let* ((session (agent-term-test--start temporary-file-directory))
+           (draft (agent-term-draft--create session)))
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer (agent-term--session-buffer session)))
+      (with-current-buffer draft
+        (insert "later")
+        (should-error (agent-term-draft-send) :type 'user-error))
+      (should (buffer-live-p draft))
+      (should (equal (agent-term-test--draft-text draft) "later")))))
+
+(ert-deftest agent-term-test-draft-announced-on-start ()
+  "Starting a session mentions its saved drafts."
+  (skip-unless (agent-term-test--ghostel-p))
+  (agent-term-test--with-drafts _log
+    (let* ((dir temporary-file-directory)
+           (draft (agent-term-draft--create (agent-term-test--start dir)))
+           (messages nil))
+      (kill-buffer draft)
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer (agent-term--session-buffer (agent-term--session-for-directory dir))))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+        (agent-term--create-session 'claude dir))
+      (should (cl-some (lambda (m) (string-match-p "1 saved draft for this project" m))
+                       messages)))))
+
 (provide 'agent-term-test)
 
 ;;; agent-term-test.el ends here

@@ -91,6 +91,8 @@ current window instead (with `agent-term-use-side-window` set to nil):
 | `agent-term-toggle-recent`        | Hide all session windows, or show the most recent one     |
 | `agent-term-switch-to-buffer`     | Select the session window                                 |
 | `agent-term-list-sessions`        | Pick one of the running sessions                          |
+| `agent-term-draft`                | Write a prompt in a draft buffer (`C-u`: saved drafts)    |
+| `agent-term-drafts`               | Reopen a saved draft of any project                       |
 | `agent-term-send-prompt`          | Send a prompt from the minibuffer                         |
 | `agent-term-send-escape`          | Send ESC to the agent                                     |
 | `agent-term-insert-newline`       | Insert a newline in the agent prompt                      |
@@ -107,9 +109,37 @@ Keys in a session buffer (in addition to ghostel's own):
 | `S-RET`      | `agent-term-insert-newline` (backslash + return)          |
 | `C-<escape>` | `agent-term-send-escape`                                  |
 | `C-_`        | sent to the agent, even when an undo mode binds it globally |
+| `C-c '`      | `agent-term-draft`: open a new draft                       |
 
-Add keys that Emacs should handle instead of the terminal to
-`agent-term-emacs-keybindings`, e.g. `'("C-l")`.
+These keys live in `agent-term-session-map`; add your own there. Keys that
+Emacs should handle with their global binding instead of the terminal go
+into `agent-term-emacs-keybindings`, e.g. `'("C-l")`.
+
+## Drafts
+
+For longer prompts, press `C-c '` in a session buffer (or `M-x
+agent-term-draft` in any buffer of the project). A draft buffer opens below,
+with full Emacs editing:
+
+| Key           | Action                                                         |
+|---------------|----------------------------------------------------------------|
+| `C-c C-c`     | Send the draft to the agent and submit it, close the draft     |
+| `C-u C-c C-c` | Send it into the agent's prompt without submitting             |
+| `C-c C-k`     | Throw the draft away                                           |
+
+- Any number of drafts can be open at once, for one or several projects.
+- Each draft is written to `agent-term-draft-directory` while you type and
+  stays there until it is sent or thrown away. Killing the buffer or
+  restarting Emacs does not lose it: `C-u C-c '` reopens a saved draft of
+  the project, `M-x agent-term-drafts` one of any project. Starting a
+  session reports its saved drafts.
+- A draft belongs to its project directory and goes to the session that runs
+  there when you send it. Without a running session, the draft is kept.
+
+```elisp
+(setq agent-term-draft-major-mode #'markdown-mode   ; default: text-mode
+      agent-term-draft-window-height 15)
+```
 
 ## Configuration
 
@@ -129,6 +159,10 @@ Add keys that Emacs should handle instead of the terminal to
 | `agent-term-focus-on-open`       | `t`        | Select the window when it is shown                           |
 | `agent-term-show-modeline`       | `t`        | Turn `hide-mode-line-mode` off in session buffers            |
 | `agent-term-emacs-keybindings`   | `()`       | Keys handled by their global Emacs binding                   |
+| `agent-term-draft-directory`     | `~/.emacs.d/agent-term-drafts/` | Where drafts are kept until sent           |
+| `agent-term-draft-major-mode`    | `text-mode` | Major mode of draft buffers                                 |
+| `agent-term-draft-window-height` | `10`       | Height of the draft window                                   |
+| `agent-term-draft-save-delay`    | `0.5`      | Seconds between saves of changed drafts                      |
 
 Example for a different Claude model:
 

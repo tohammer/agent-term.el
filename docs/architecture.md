@@ -9,6 +9,7 @@ Emacs functions to the agent over MCP.
 | File                              | Role                                                          |
 |-----------------------------------|---------------------------------------------------------------|
 | `agent-term.el`                  | Agents, sessions, command line, display, commands             |
+| `agent-term-draft.el`            | Draft buffers: persistent prompts sent with C-c C-c          |
 | `agent-term-transient.el`        | `agent-term-menu` and its submenus                           |
 | `agent-term-mcp-server.el`       | Tool registry, session registry, server lifecycle             |
 | `agent-term-mcp-http-server.el`  | HTTP/1.1 server and MCP JSON-RPC dispatch                     |
@@ -88,13 +89,48 @@ Tests: `agent-term-test-same-basename-projects`,
   buffer. The session keys are therefore an entry in the buffer-local
   `minor-mode-overriding-map-alist`, keyed by the buffer-local
   `agent-term--keybinding-override`. That entry also ranks above global
-  minor modes, which is what makes `C-_` reach the agent. Test:
+  minor modes, which is what makes `C-_` reach the agent. Its keymap
+  inherits from `agent-term-session-map`, where users add keys. Test:
   `agent-term-test-session-keys-are-buffer-local`.
 - ghostel's process sentinel cleans up ghostel's own state (and, for the
   native PTY, kills the child). The package must not replace it; it hooks
   into `ghostel-exit-functions` instead.
 - `ghostel-paste-string` sends bracketed paste, so a multi-line prompt from
   `agent-term-send-prompt` is not submitted line by line.
+
+## Drafts
+
+`agent-term-draft.el`. A draft is a buffer in `agent-term-draft-major-mode`
+with the minor mode `agent-term-draft-mode` (C-c C-c send, C-c C-k cancel).
+It is identified by an id (creation time plus random suffix) and stored as
+two files in `agent-term-draft-directory`: `ID.eld` (plist: id, project
+directory, agent, creation time; written once) and `ID.txt` (the text).
+Sending or cancelling deletes both; nothing else does.
+
+- **Many drafts:** every `agent-term-draft` creates a new id and buffer;
+  buffers are found by their buffer-local id, never by name. Test:
+  `agent-term-test-draft-many`.
+- **Saving:** a repeating timer (`agent-term-draft-save-delay`) writes every
+  draft whose `buffer-chars-modified-tick` changed; it stops when no draft
+  buffer is left. `kill-buffer-hook` and `kill-emacs-hook` save as well.
+  `after-change-functions` is not used: in Emacs 31, after a change of
+  major mode the first change in the buffer skips a buffer-local
+  after-change function (reproduced in batch; a message or redisplay in
+  between hides it). Tests: `agent-term-test-draft-saved-while-typing`,
+  `agent-term-test-draft-survives-kill-and-restart`.
+- **Major-mode changes:** the draft variables, the minor mode and the
+  kill-buffer hook are permanent-local, so e.g. `M-x markdown-mode` keeps
+  the buffer a saved draft. Test:
+  `agent-term-test-draft-survives-major-mode-change`.
+- **Target:** the project directory, resolved at send time with
+  `agent-term--session-for-directory`, so drafts outlive sessions and Emacs
+  restarts. Without a session, sending fails and the draft is kept. Test:
+  `agent-term-test-draft-kept-without-session`.
+- **Sending:** `agent-term--send-text` (bracketed paste, then Return after
+  0.1 s), shared with `agent-term-send-prompt`. Test:
+  `agent-term-test-draft-send`.
+- **Buffer names** have no leading `*`: Doom's popup defaults treat such
+  buffers as popups and kill them when their window closes.
 
 ## Display
 

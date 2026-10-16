@@ -56,6 +56,7 @@
 (require 'agent-term-mcp-server)
 (require 'agent-term-diagnostics)
 (require 'agent-term-emacs-tools)
+(require 'agent-term-draft)
 
 (defvar ghostel-environment)
 (defvar ghostel-exit-functions)
@@ -424,15 +425,25 @@ precedence over ghostel's local keymap."
     (when-let* ((binding (global-key-binding (kbd "C-_"))))
       (call-interactively binding))))
 
-(defun agent-term--setup-keybindings ()
-  "Install the session key overrides in the current buffer.
-ghostel replaces the local keymap whenever the input mode changes, and
-that keymap is shared by all ghostel buffers, so the overrides live in
-a buffer-local `minor-mode-overriding-map-alist' entry instead."
+(defvar agent-term-session-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "S-<return>") #'agent-term-insert-newline)
     (define-key map (kbd "C-<escape>") #'agent-term-send-escape)
     (define-key map (kbd "C-_") #'agent-term--forward-c-underscore)
+    (define-key map (kbd "C-c '") #'agent-term-draft)
+    map)
+  "Keys that session buffers handle before ghostel does.
+Changes take effect in sessions started afterwards.")
+
+(defun agent-term--setup-keybindings ()
+  "Install the session key overrides in the current buffer.
+ghostel replaces the local keymap whenever the input mode changes, and
+that keymap is shared by all ghostel buffers, so the overrides live in
+a buffer-local `minor-mode-overriding-map-alist' entry instead.  The
+entry's keymap inherits from `agent-term-session-map' and adds
+`agent-term-emacs-keybindings'."
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map agent-term-session-map)
     (dolist (key agent-term-emacs-keybindings)
       (when-let* ((binding (global-key-binding (kbd key))))
         (define-key map (kbd key) binding)))
@@ -522,6 +533,7 @@ CONTINUE and RESUME are passed to `agent-term--build-args'."
                            (if-let* ((port (agent-term-mcp-server-get-port)))
                                (format " with MCP tools on port %d" port)
                              ""))
+          (agent-term-draft--announce directory)
           session)
       (error
        (agent-term--end-session session)
@@ -650,20 +662,28 @@ the agent shows its session picker."
      (ghostel-send-string "\r"))))
 
 ;;;###autoload
-(defun agent-term-send-prompt (&optional prompt)
-  "Send PROMPT (or one read from the minibuffer) to the agent and submit it.
+(defun agent-term--send-text (session text &optional no-submit)
+  "Send TEXT to the agent of SESSION and submit it unless NO-SUBMIT.
 The text is sent as a bracketed paste, so line breaks stay in the
 prompt instead of submitting it early."
+  (with-current-buffer (agent-term--session-buffer session)
+    (ghostel-paste-string text)
+    (unless no-submit
+      ;; Give the agent a moment to take the paste before Return.
+      (sit-for 0.1)
+      (ghostel-send-string "\r"))))
+
+;;;###autoload
+(defun agent-term-send-prompt (&optional prompt)
+  "Send PROMPT (or one read from the minibuffer) to the agent and submit it.
+For longer prompts, see `agent-term-draft'."
   (interactive)
-  (let ((session (agent-term--require-session)))
-    (let ((text (or prompt (read-string (format "%s prompt: "
-                                                (agent-term--agent-name
-                                                 (agent-term--session-agent session)))))))
-      (unless (string-empty-p text)
-        (with-current-buffer (agent-term--session-buffer session)
-          (ghostel-paste-string text)
-          (sit-for 0.1)
-          (ghostel-send-string "\r"))))))
+  (let* ((session (agent-term--require-session))
+         (text (or prompt (read-string (format "%s prompt: "
+                                               (agent-term--agent-name
+                                                (agent-term--session-agent session)))))))
+    (unless (string-empty-p text)
+      (agent-term--send-text session text))))
 
 ;;;###autoload
 (defun agent-term-toggle ()

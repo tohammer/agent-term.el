@@ -211,6 +211,8 @@
     ("w" "Toggle window" agent-term-toggle)
     ("W" "Toggle recent window" agent-term-toggle-recent)]
    ["Interaction"
+    ("t" "New draft" agent-term-draft)
+    ("T" "Saved drafts" agent-term-drafts)
     ("p" "Send prompt from minibuffer" agent-term-send-prompt)
     ("e" "Send escape key" agent-term-send-escape)
     ("n" "Insert newline" agent-term-insert-newline)]
