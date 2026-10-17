@@ -17,6 +17,25 @@ Emacs functions to the agent over MCP.
 | `agent-term-diagnostics.el`      | The `get_diagnostics` tool (Flycheck/Flymake)                  |
 | `agent-term-debug.el`            | Logging                                                       |
 
+## Autoloads
+
+`agent-term.el` requires all other files. Commands defined in
+`agent-term-draft.el` and `agent-term-transient.el` call functions of
+`agent-term.el`, so their autoload cookies name `"agent-term"` as the file
+to load (`;;;###autoload (autoload 'agent-term-draft "agent-term" nil t)`);
+a plain cookie would load only their own file and fail with
+`void-function` in a fresh Emacs. Test:
+`agent-term-test-autoloads-load-main-file`.
+
+## Emacs versions
+
+The package supports Emacs 28.1. Only `treesit_info` needs tree-sitter
+(Emacs 29): its functions are declared, and `agent-term-mcp--treesit-p`
+checks each of them with `fboundp` before use (which also keeps
+package-lint quiet). Test: `agent-term-test-treesit-info-without-treesit`.
+CI (`.github/workflows/test.yml`) runs `make all` on 28.2, 30.2 and 31.1,
+with ghostel from MELPA and its prebuilt native module.
+
 ## Agents
 
 `agent-term-agents` describes each agent by a plist: display name,

@@ -1,8 +1,10 @@
 EMACS ?= emacs
-# Directories of the dependencies (transient and its dependencies,
-# ghostel), e.g. LOAD_PATH="-L ~/.emacs.d/elpa/transient-0.9.0 ...".
+# Dependencies (transient and its dependencies, ghostel) are taken from
+# package.el, or from directories given in LOAD_PATH, e.g.
+# LOAD_PATH="-L ../transient/lisp -L ../compat -L ../ghostel/lisp".
 LOAD_PATH ?=
-BATCH = $(EMACS) -Q --batch -L . $(LOAD_PATH) --eval '(setq load-prefer-newer t)'
+BATCH = $(EMACS) -Q --batch --eval '(package-initialize)' -L . $(LOAD_PATH) \
+	--eval '(setq load-prefer-newer t)'
 FILES = $(wildcard agent-term*.el)
 
 .PHONY: all compile checkdoc test clean

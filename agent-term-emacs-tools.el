@@ -42,8 +42,18 @@
 (require 'seq)
 (require 'subr-x)
 
-;; Tree-sitter declarations
+;; Tree-sitter declarations (Emacs 29+; see `agent-term-mcp--treesit-p')
+(declare-function treesit-available-p "treesit.c" ())
+(declare-function treesit-parser-list "treesit.c" (&optional buffer))
+(declare-function treesit-parser-root-node "treesit.c" (parser))
 (declare-function treesit-node-at "treesit" (pos &optional parser-or-lang named))
+(declare-function treesit-node-type "treesit.c" (node))
+(declare-function treesit-node-check "treesit.c" (node property))
+(declare-function treesit-node-start "treesit.c" (node))
+(declare-function treesit-node-end "treesit.c" (node))
+(declare-function treesit-node-parent "treesit.c" (node))
+(declare-function treesit-node-child "treesit.c" (node n &optional named))
+(declare-function treesit-node-child-count "treesit.c" (node &optional named))
 (declare-function treesit-node-text "treesit" (node &optional no-property))
 (declare-function treesit-node-field-name "treesit" (node))
 
@@ -256,6 +266,25 @@ Falls back to a grep-based project search when LSP is not connected."
         (error (format "Error listing symbols in %s: %s"
                        file-path (error-message-string err)))))))
 
+(defun agent-term-mcp--treesit-p ()
+  "Return non-nil if this Emacs supports tree-sitter (Emacs 29 or newer).
+Every tree-sitter function the tools call is checked, so the tools
+fail gracefully on older Emacsen."
+  (and (fboundp 'treesit-available-p)
+       (fboundp 'treesit-parser-list)
+       (fboundp 'treesit-parser-root-node)
+       (fboundp 'treesit-node-at)
+       (fboundp 'treesit-node-type)
+       (fboundp 'treesit-node-check)
+       (fboundp 'treesit-node-start)
+       (fboundp 'treesit-node-end)
+       (fboundp 'treesit-node-parent)
+       (fboundp 'treesit-node-child)
+       (fboundp 'treesit-node-child-count)
+       (fboundp 'treesit-node-text)
+       (fboundp 'treesit-node-field-name)
+       (treesit-available-p)))
+
 (defun agent-term-mcp-treesit--format-tree (node level max-depth)
   "Format NODE at depth LEVEL as an indented tree string up to MAX-DEPTH."
   (if (or (not node) (>= level max-depth))
@@ -298,7 +327,7 @@ INCLUDE_ANCESTORS and INCLUDE_CHILDREN expand the output."
       (error "The file_path parameter is required")
     (agent-term-mcp-server-with-session-context nil
       (condition-case err
-          (if (not (treesit-available-p))
+          (if (not (agent-term-mcp--treesit-p))
               "Tree-sitter is not available in this Emacs build"
             (let ((target-buffer (agent-term-mcp--get-xref-buffer file-path)))
               (with-current-buffer target-buffer

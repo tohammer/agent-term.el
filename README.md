@@ -13,8 +13,6 @@ Typical uses:
 - let the agent ask Emacs (and its LSP client) for definitions and references
   instead of grepping.
 
-Formerly named copilot-ide.el.
-
 Heavily inspired by and based on [claude-code-ide.el](https://github.com/manzaltu/claude-code-ide.el)
 by Yoav Orot (manzaltu), used under GPL-3.0.
 
@@ -22,6 +20,7 @@ by Yoav Orot (manzaltu), used under GPL-3.0.
 
 - Emacs 28.1 or newer
 - [ghostel](https://github.com/dakra/ghostel) 0.56 or newer, with its native module
+  (`M-x ghostel-download-module`, or see ghostel's README)
 - [transient](https://github.com/magit/transient) 0.9.0 or newer
 - the agent CLI on `PATH`: `copilot` or `claude`
 
@@ -222,6 +221,9 @@ gets an endpoint with a random secret token; other requests are refused.
 | `compilation_errors`     | Errors from the project's last `M-x compile`              |
 | `eval_elisp`             | Evaluate an Emacs Lisp expression                         |
 
+`get_diagnostics` uses Flycheck when it is active in a buffer, else Flymake;
+set `agent-term-diagnostics-backend` to `flycheck` or `flymake` to force one.
+
 Relative file paths are resolved against the project root. The agent asks
 for permission before each tool call unless the tool is allowed with
 `agent-term-mcp-allow-tools`; be careful with `eval_elisp`.
@@ -256,6 +258,12 @@ the user's last file buffer of the session's project current and binds
 
 Or use the debug submenu of `agent-term-menu`.
 
+| Variable                       | Default                | Description                                 |
+|--------------------------------|------------------------|---------------------------------------------|
+| `agent-term-debug`             | `nil`                  | Log to the debug buffer                     |
+| `agent-term-debug-buffer`      | `"*agent-term-debug*"` | Name of the debug buffer                    |
+| `agent-term-log-with-context`  | `t`                    | Prefix messages with the project name       |
+
 ## Development
 
 ```sh
@@ -263,8 +271,10 @@ make            # byte-compile (warnings are errors), checkdoc, tests
 make test
 ```
 
-The dependencies are found through `LOAD_PATH`, e.g.
+The dependencies are taken from package.el (`~/.emacs.d/elpa`), or from
+directories given in `LOAD_PATH`, e.g.
 `make LOAD_PATH="-L ../transient/lisp -L ../compat -L ../ghostel/lisp"`.
+CI runs `make all` on Emacs 28.2, 30.2 and 31.1.
 The session tests start `test/fake-agent` in ghostel and are skipped when
 ghostel or its native module is not available. How the package works is
 described in [docs/architecture.md](docs/architecture.md).

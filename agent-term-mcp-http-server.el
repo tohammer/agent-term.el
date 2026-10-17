@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2025 Tobias Hammer
 
-;; Keywords: ai, mcp, http
+;; Keywords: tools, ai, mcp, http
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is not part of GNU Emacs.
