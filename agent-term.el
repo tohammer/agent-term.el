@@ -1,4 +1,4 @@
-;;; agent-term.el --- Run Copilot CLI or Claude Code in Emacs  -*- lexical-binding: t; -*-
+;;; agent-term.el --- Run Copilot CLI or Claude Code in a terminal buffer  -*- lexical-binding: t; -*-
 
 ;; Author: Tobias Hammer <tohammer@users.noreply.github.com>
 ;; Maintainer: Tobias Hammer <tohammer@users.noreply.github.com>
@@ -10,7 +10,7 @@
 
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1") (transient "0.9.0") (ghostel "0.56.0"))
-;; Keywords: ai, copilot, claude, mcp, assistant
+;; Keywords: tools, ai, copilot, claude, mcp, assistant
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; URL: https://github.com/tohammer/agent-term.el
 
@@ -350,7 +350,7 @@ Used as the key of an entry in `minor-mode-overriding-map-alist'.")
     window))
 
 (defun agent-term--hide-buffer (buffer)
-  "Hide every window that shows BUFFER in the selected frame."
+  "Hide every window of the selected frame that displays BUFFER."
   (setq agent-term--last-accessed-buffer buffer)
   (dolist (window (get-buffer-window-list buffer nil))
     ;; `quit-restore-window' deletes a window that was made for BUFFER
@@ -456,7 +456,7 @@ entry's keymap inherits from `agent-term-session-map' and adds
 ;;; Session Start/Stop
 
 (defun agent-term--unique-buffer-name (name)
-  "Return NAME, or a variant of it when a live buffer already uses it."
+  "Return NAME, or a variant of it when a live buffer has that name."
   (if (get-buffer name) (generate-new-buffer-name name) name))
 
 (defun agent-term--end-session (session)
@@ -661,7 +661,6 @@ the agent shows its session picker."
      (sit-for 0.1)
      (ghostel-send-string "\r"))))
 
-;;;###autoload
 (defun agent-term--send-text (session text &optional no-submit)
   "Send TEXT to the agent of SESSION and submit it unless NO-SUBMIT.
 The text is sent as a bracketed paste, so line breaks stay in the

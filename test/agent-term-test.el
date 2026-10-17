@@ -381,6 +381,30 @@ Strings in a list are sent as separate writes.  Return (STATUS . BODY)."
             (should (equal (length refs) 2))))
       (delete-directory project t))))
 
+(ert-deftest agent-term-test-treesit-info-without-treesit ()
+  "Without tree-sitter (Emacs 28), treesit_info answers instead of failing."
+  (agent-term-test--with-clean-state
+    (agent-term-mcp-server-session-started "s" temporary-file-directory nil)
+    (cl-letf (((symbol-function 'treesit-available-p) nil))
+      (let ((agent-term-mcp-server--current-session-id "s"))
+        (should (equal (agent-term-mcp-treesit-info "a.py")
+                       "Tree-sitter is not available in this Emacs build"))))))
+
+;;; Autoloads
+
+(ert-deftest agent-term-test-autoloads-load-main-file ()
+  "Commands autoloaded from other files load agent-term.el.
+They call functions of agent-term.el, which their own files do not
+require, so an autoload of their own file fails in a fresh Emacs."
+  (dolist (file '("agent-term-draft.el" "agent-term-transient.el"))
+    (with-temp-buffer
+      (insert-file-contents
+       (expand-file-name file (file-name-directory
+                               (directory-file-name agent-term-test--dir))))
+      (while (re-search-forward "^;;;###autoload\\(.*\\)$" nil t)
+        (should (string-match-p "\\` (autoload '[^ ]+ \"agent-term\" "
+                                (match-string 1)))))))
+
 ;;; Sessions (ghostel)
 
 (ert-deftest agent-term-test-session-environment-and-args ()

@@ -192,7 +192,7 @@ change in the buffer."
       (setq agent-term-draft--timer nil))))
 
 (defun agent-term-draft--ensure-timer ()
-  "Start the save timer unless it runs."
+  "Start the save timer if it is not running yet."
   (unless (memq agent-term-draft--timer timer-list)
     (setq agent-term-draft--timer
           (run-with-timer agent-term-draft-save-delay agent-term-draft-save-delay
@@ -288,7 +288,7 @@ Nothing is written to disk until the draft has text."
 
 ;;; Commands
 
-;;;###autoload
+;;;###autoload (autoload 'agent-term-draft "agent-term" nil t)
 (defun agent-term-draft (&optional choose)
   "Open a new draft for the agent session of this buffer or project.
 In the draft, `agent-term-draft-send' (\\<agent-term-draft-mode-map>\\[agent-term-draft-send]) sends it,
@@ -308,7 +308,7 @@ instead (or a new one)."
      (if meta (agent-term-draft--open meta) (agent-term-draft--create session)))
     (goto-char (point-max))))
 
-;;;###autoload
+;;;###autoload (autoload 'agent-term-drafts "agent-term" nil t)
 (defun agent-term-drafts ()
   "Reopen one of the saved drafts of any project."
   (interactive)

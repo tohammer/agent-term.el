@@ -6,7 +6,7 @@
 ;; Based on claude-code-ide.el by Yoav Orot (manzaltu)
 ;; https://github.com/manzaltu/claude-code-ide.el
 
-;; Keywords: ai, mcp, debug
+;; Keywords: tools, ai, mcp, debug
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is not part of GNU Emacs.

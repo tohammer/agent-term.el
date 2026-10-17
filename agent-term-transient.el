@@ -6,7 +6,7 @@
 ;; Based on claude-code-ide.el by Yoav Orot (manzaltu)
 ;; https://github.com/manzaltu/claude-code-ide.el
 
-;; Keywords: ai, transient, menu
+;; Keywords: tools, ai, transient, menu
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is not part of GNU Emacs.
@@ -81,7 +81,7 @@
     label))
 
 (defmacro agent-term--define-start-command (name command)
-  "Define NAME, which runs COMMAND unless a session is running."
+  "Define the command NAME: run COMMAND unless a session is running."
   `(defun ,name ()
      ,(format "Run `%s' unless the project already has a session." command)
      (interactive)
@@ -191,7 +191,7 @@
 
 ;;; Transient Menus
 
-;;;###autoload (autoload 'agent-term-menu "agent-term-transient" "Agent session menu." t)
+;;;###autoload (autoload 'agent-term-menu "agent-term" "Agent session menu." t)
 (transient-define-prefix agent-term-menu ()
   "Agent session menu."
   [:description agent-term--session-status]
