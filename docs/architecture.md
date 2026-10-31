@@ -132,14 +132,18 @@ deletes both; otherwise only emptying the draft does. Test:
 - **Many drafts:** every `agent-term-draft` creates a new id and buffer;
   buffers are found by their buffer-local id, never by name. Test:
   `agent-term-test-draft-many`.
-- **Saving:** a repeating timer (`agent-term-draft-save-delay`) writes every
-  draft whose `buffer-chars-modified-tick` changed; it stops when no draft
+- **Saving:** an idle timer (`agent-term-draft-save-delay`) writes every
+  draft whose `buffer-chars-modified-tick` changed, so typing is not
+  interrupted by writes; a repeating timer (`agent-term-draft-save-interval`)
+  does the same during typing without pauses. Both stop when no draft
   buffer is left. `kill-buffer-hook` and `kill-emacs-hook` save as well.
+  Draft files are written without lock files, which took most of the time
+  of a write (about 10 ms each, from a profile of typing in a draft).
   `after-change-functions` is not used: in Emacs 31, after a change of
   major mode the first change in the buffer skips a buffer-local
   after-change function (reproduced in batch; a message or redisplay in
   between hides it). Tests: `agent-term-test-draft-saved-while-typing`,
-  `agent-term-test-draft-survives-kill-and-restart`.
+  `agent-term-test-draft-survives-kill-and-restart`, `agent-term-test-draft-save-timers`.
 - **Major-mode changes:** the draft variables, the minor mode and the
   kill-buffer hook are permanent-local, so e.g. `M-x markdown-mode` keeps
   the buffer a saved draft. Test:

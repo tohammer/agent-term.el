@@ -69,7 +69,12 @@
   :type 'integer)
 
 (defcustom agent-term-draft-save-delay 0.5
-  "Seconds between checks for unsaved changes in drafts."
+  "Seconds of idle time after which changed drafts are saved."
+  :type 'number)
+
+(defcustom agent-term-draft-save-interval 10
+  "Seconds between saves of changed drafts while typing without a pause.
+This bounds what is lost when Emacs dies before an idle save."
   :type 'number)
 
 ;;; State
@@ -97,8 +102,11 @@
   "In a draft buffer: `buffer-chars-modified-tick' at the last save.")
 (put 'agent-term-draft--saved-tick 'permanent-local t)
 
-(defvar agent-term-draft--timer nil
-  "Timer that saves modified drafts; runs while draft buffers exist.")
+(defvar agent-term-draft--idle-timer nil
+  "Idle timer that saves changed drafts; runs while draft buffers exist.")
+
+(defvar agent-term-draft--interval-timer nil
+  "Timer that saves changed drafts during long stretches of typing.")
 
 (defvar agent-term-draft-mode-map
   (let ((map (make-sparse-keymap)))
@@ -131,7 +139,10 @@ throws the draft away.  Until then the draft is kept in
 (defun agent-term-draft--write (file string)
   "Write STRING to FILE as UTF-8, without messages."
   (make-directory (file-name-directory file) t)
-  (let ((coding-system-for-write 'utf-8-unix))
+  ;; Lock files cost most of the time of a write; only this code writes
+  ;; draft files, so they protect nothing.
+  (let ((coding-system-for-write 'utf-8-unix)
+        (create-lockfiles nil))
     (write-region string nil file nil 'silent)))
 
 (defun agent-term-draft--read (file)
@@ -188,15 +199,29 @@ change in the buffer."
                    (buffer-local-value 'agent-term-draft--saved-tick buffer))
         (agent-term-draft--save buffer)))
     (unless buffers
-      (cancel-timer agent-term-draft--timer)
-      (setq agent-term-draft--timer nil))))
+      (agent-term-draft--stop-timers))))
 
 (defun agent-term-draft--ensure-timer ()
-  "Start the save timer if it is not running yet."
-  (unless (memq agent-term-draft--timer timer-list)
-    (setq agent-term-draft--timer
-          (run-with-timer agent-term-draft-save-delay agent-term-draft-save-delay
+  "Start the save timers if they are not running yet.
+The idle timer saves after a pause in typing; the interval timer saves
+during typing without pauses, when the idle timer never fires."
+  (unless (memq agent-term-draft--idle-timer timer-idle-list)
+    (setq agent-term-draft--idle-timer
+          (run-with-idle-timer agent-term-draft-save-delay t
+                               #'agent-term-draft--save-modified)))
+  (unless (memq agent-term-draft--interval-timer timer-list)
+    (setq agent-term-draft--interval-timer
+          (run-with-timer agent-term-draft-save-interval agent-term-draft-save-interval
                           #'agent-term-draft--save-modified))))
+
+(defun agent-term-draft--stop-timers ()
+  "Cancel the save timers."
+  (when agent-term-draft--idle-timer
+    (cancel-timer agent-term-draft--idle-timer)
+    (setq agent-term-draft--idle-timer nil))
+  (when agent-term-draft--interval-timer
+    (cancel-timer agent-term-draft--interval-timer)
+    (setq agent-term-draft--interval-timer nil)))
 
 (defun agent-term-draft--save-all ()
   "Save all draft buffers (run from `kill-emacs-hook')."

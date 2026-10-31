@@ -528,12 +528,17 @@ LOG is bound to the agent's log file."
   (declare (indent 1))
   `(agent-term-test--with-agent-env ,log
      (let ((agent-term-draft-directory (file-name-as-directory (make-temp-file "drafts" t)))
-           (agent-term-draft-save-delay 0.05))
+           (agent-term-draft-save-delay 0.05)
+           ;; Idle timers do not fire in batch Emacs; the interval timer
+           ;; does the saving in these tests.
+           (agent-term-draft-save-interval 0.05))
+       (agent-term-draft--stop-timers)
        (unwind-protect
            (progn ,@body)
          (dolist (b (agent-term-draft--buffers))
            (with-current-buffer b (setq agent-term-draft--finished t))
            (kill-buffer b))
+         (agent-term-draft--stop-timers)
          (delete-directory agent-term-draft-directory t)))))
 
 (defun agent-term-test--draft-text (buffer)
@@ -591,6 +596,38 @@ LOG is bound to the agent's log file."
       (with-current-buffer draft (insert "hello"))
       (should (agent-term-test--wait-for
                (lambda () (equal (agent-term-test--draft-text draft) "hello")))))))
+
+(ert-deftest agent-term-test-draft-save-timers ()
+  "Drafts are saved when idle and at an interval; the timers stop with the drafts."
+  (skip-unless (agent-term-test--ghostel-p))
+  (agent-term-test--with-drafts _log
+    (let ((draft (agent-term-draft--create (agent-term-test--start temporary-file-directory))))
+      (should (memq agent-term-draft--idle-timer timer-idle-list))
+      (should (eq (timer--function agent-term-draft--idle-timer)
+                  #'agent-term-draft--save-modified))
+      (should (timer--repeat-delay agent-term-draft--idle-timer))
+      (should (memq agent-term-draft--interval-timer timer-list))
+      (should (equal (timer--repeat-delay agent-term-draft--interval-timer) 0.05))
+      (with-current-buffer draft (setq agent-term-draft--finished t))
+      (kill-buffer draft)
+      (agent-term-draft--save-modified)
+      (should-not agent-term-draft--idle-timer)
+      (should-not agent-term-draft--interval-timer))))
+
+(ert-deftest agent-term-test-draft-write-no-lockfile ()
+  "Writing a draft file does not create a lock file."
+  (let ((dir (make-temp-file "drafts" t))
+        (lock-calls 0))
+    (unwind-protect
+        (cl-letf* ((orig (symbol-function 'write-region))
+                   ((symbol-function 'write-region)
+                    (lambda (&rest args)
+                      (when create-lockfiles (cl-incf lock-calls))
+                      (apply orig args))))
+          (agent-term-draft--write (expand-file-name "x.txt" dir) "text")
+          (should (equal (agent-term-draft--read (expand-file-name "x.txt" dir)) "text"))
+          (should (= lock-calls 0)))
+      (delete-directory dir t))))
 
 (ert-deftest agent-term-test-draft-empty-not-saved ()
   "A draft with only whitespace leaves no files behind."
