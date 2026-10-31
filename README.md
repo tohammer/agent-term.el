@@ -162,7 +162,8 @@ with full Emacs editing:
 | `agent-term-draft-directory`     | `~/.emacs.d/agent-term-drafts/` | Where drafts are kept until sent           |
 | `agent-term-draft-major-mode`    | `text-mode` | Major mode of draft buffers                                 |
 | `agent-term-draft-window-height` | `10`       | Height of the draft window                                   |
-| `agent-term-draft-save-delay`    | `0.5`      | Seconds between saves of changed drafts                      |
+| `agent-term-draft-save-delay`    | `0.5`      | Idle seconds after which changed drafts are saved            |
+| `agent-term-draft-save-interval` | `10`       | Seconds between saves while typing without a pause           |
 
 Example for a different Claude model:
 
