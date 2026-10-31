@@ -64,7 +64,7 @@
   "Major mode for new draft buffers, e.g. `markdown-mode'."
   :type 'function)
 
-(defcustom agent-term-draft-window-height 10
+(defcustom agent-term-draft-window-height 20
   "Height in lines of the window that shows a draft."
   :type 'integer)
 

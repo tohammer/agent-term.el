@@ -138,7 +138,7 @@ with full Emacs editing:
 
 ```elisp
 (setq agent-term-draft-major-mode #'markdown-mode   ; default: text-mode
-      agent-term-draft-window-height 15)
+      agent-term-draft-window-height 30)   ; default: 20
 ```
 
 ## Configuration
@@ -161,7 +161,7 @@ with full Emacs editing:
 | `agent-term-emacs-keybindings`   | `()`       | Keys handled by their global Emacs binding                   |
 | `agent-term-draft-directory`     | `~/.emacs.d/agent-term-drafts/` | Where drafts are kept until sent           |
 | `agent-term-draft-major-mode`    | `text-mode` | Major mode of draft buffers                                 |
-| `agent-term-draft-window-height` | `10`       | Height of the draft window                                   |
+| `agent-term-draft-window-height` | `20`       | Height of the draft window                                   |
 | `agent-term-draft-save-delay`    | `0.5`      | Idle seconds after which changed drafts are saved            |
 | `agent-term-draft-save-interval` | `10`       | Seconds between saves while typing without a pause           |
 
